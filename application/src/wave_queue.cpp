@@ -635,11 +635,12 @@ bool WaveQueue::maybeAutoRetryAll() {
     return true;
 }
 void WaveQueue::continueAllAfterRetry() {
+    if (!batchRunning_)
+        return;
     allPrefixReconcilePending_ = false;
     resumeAllAfterRetry_ = false;
     retryMode_ = false;
     retryPage_.clear();
-    batchRunning_ = true;
     allPrefixReconciling_ = true;
     const auto generation = batchEpoch_;
     const auto cursor = batchCursor_;
@@ -755,10 +756,14 @@ void WaveQueue::fetchRetries(bool start) {
             failureSummary_ = page.summary;
             retryPage_ = page.records;
             if (retryPage_.isEmpty()) {
-                batchRunning_ = false;
                 retryComplete_ = true;
-                if (resumeAllAfterRetry_)
+                // Pause can occur while this terminal local query is in flight.
+                // Keep its continuation receipt, but only an explicit resume may
+                // hand it back to all-mode once the user has paused the queue.
+                if (resumeAllAfterRetry_ && batchRunning_)
                     continueAllAfterRetry();
+                else
+                    batchRunning_ = false;
             }
         }
         savePreparation();

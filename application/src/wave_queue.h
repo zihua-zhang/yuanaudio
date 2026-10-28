@@ -33,6 +33,7 @@ class WaveQueue : public QObject {
     friend class WindowTests;
     friend class QueueRefreshTests;
     friend class QueuePolicyTests;
+    friend class AutoSourceRepairTests;
 
   public:
     explicit WaveQueue(QString localCache, QObject *parent = nullptr);

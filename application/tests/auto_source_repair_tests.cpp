@@ -15,6 +15,7 @@ using SourceRepairHandler = std::function<void(const Track &, SourceRepairComple
 #include <QJsonDocument>
 #include <QScopeGuard>
 #include <QSignalSpy>
+#include <QSemaphore>
 #include <QTemporaryDir>
 #include <QtTest>
 
@@ -74,6 +75,89 @@ class AutoSourceRepairTests : public QObject {
         queue.configurePreparation(data.filePath("library.sqlite"), data.filePath("progress.json"));
     }
   private slots:
+    void terminalRetryFetchCannotResumePausedAllPreparation_data() {
+        QTest::addColumn<bool>("reopen");
+        QTest::newRow("explicit-resume") << false;
+        QTest::newRow("reopen-then-resume") << true;
+    }
+    void terminalRetryFetchCannotResumePausedAllPreparation() {
+        QFETCH(bool, reopen);
+        QTemporaryDir data; const auto tracks = seed(data.path());
+        auto queue = std::make_unique<WaveQueue>(data.filePath("peaks")); configure(*queue, data);
+        QTRY_VERIFY(queue->failuresReady_ && !queue->failureWriting_);
+        // This is the terminal ledger page of an automatic historical sweep.
+        // Hold the real serial pool so Pause necessarily occurs before its callback.
+        queue->batchRunning_ = queue->retryMode_ = queue->resumeAllAfterRetry_ = queue->allRetryChecked_ = true;
+        queue->retryCursor_ = queue->retryUpper_ = queue->retryDone_ = queue->retryTotal_ = 1;
+        queue->batchTotal_ = 1;
+        QSemaphore entered, release;
+        queue->failurePool_.start([&] { entered.release(); release.acquire(); });
+        auto unblock = qScopeGuard([&] { release.release(); queue->failurePool_.waitForDone(); });
+        QVERIFY(entered.tryAcquire(1, 3000));
+        queue->fetchRetries(false);
+        QVERIFY(queue->retryLoading_);
+        queue->pausePreparation();
+        QVERIFY(!queue->preparation()["running"].toBool());
+        release.release(); unblock.dismiss();
+        QTRY_VERIFY(!queue->retryLoading_);
+        QVERIFY2(!queue->preparation()["running"].toBool(), "Terminal retry callback must retain the user's paused state");
+        QCOMPARE(queue->preparation()["cursor"].toInteger(), 0);
+        QCOMPARE(queue->preparation()["retryDone"].toInteger(), 1);
+        QVERIFY(queue->preparation()["resumeAllAfterRetry"].toBool());
+        if (reopen) {
+            queue.reset();
+            queue = std::make_unique<WaveQueue>(data.filePath("peaks")); configure(*queue, data);
+            QVERIFY(!queue->preparation()["running"].toBool());
+            QVERIFY(queue->preparation()["resumeAllAfterRetry"].toBool());
+        }
+        installRepair(*queue, [&](const Track &track, SourceRepairCompletion done) { done({mapped(data.path(), track)}); });
+        queue->prepareAll(0);
+        QTRY_VERIFY_WITH_TIMEOUT(queue->preparation()["complete"].toBool(), 5000);
+        QCOMPARE(queue->preparation()["mode"].toString(), QString("all"));
+        QCOMPARE(queue->preparation()["done"].toInteger(), 1);
+        QCOMPARE(queue->preparation()["failed"].toInteger(), 0);
+        QCOMPARE(queue->preparation()["retryDone"].toInteger(), 1);
+        QCOMPARE(queue->preparation()["cursor"].toInteger(), tracks.first().id);
+    }
+    void prefixCompletionCannotResumePausedAllPreparation_data() {
+        QTest::addColumn<bool>("reopen");
+        QTest::newRow("explicit-resume") << false;
+        QTest::newRow("reopen-then-resume") << true;
+    }
+    void prefixCompletionCannotResumePausedAllPreparation() {
+        QFETCH(bool, reopen);
+        QTemporaryDir data; const auto tracks = seed(data.path(), 2);
+        PeakBuilder builder(48000, 1); const float samples[256] = {.2f}; builder.append(samples, 256);
+        QVERIFY(saveWaveView(data.filePath("peaks"), WaveQueue::key(tracks.first()), builder.finish()));
+        auto queue = std::make_unique<WaveQueue>(data.filePath("peaks")); configure(*queue, data);
+        QTRY_VERIFY(queue->failuresReady_);
+        queue->batchCursor_ = tracks.first().id;
+        queue->batchTotal_ = 2;
+        queue->batchRunning_ = queue->allRetryChecked_ = true;
+        QSemaphore entered, release;
+        queue->localPool_.start([&] { entered.release(); release.acquire(); });
+        auto unblock = qScopeGuard([&] { release.release(); queue->localPool_.waitForDone(); });
+        QVERIFY(entered.tryAcquire(1, 3000));
+        queue->continueAllAfterRetry();
+        QVERIFY(queue->allPrefixReconciling_);
+        queue->pausePreparation();
+        release.release(); unblock.dismiss();
+        QTRY_VERIFY(!queue->allPrefixReconciling_);
+        QVERIFY(!queue->preparation()["running"].toBool());
+        QCOMPARE(queue->preparation()["cursor"].toInteger(), tracks.first().id);
+        QCOMPARE(queue->preparation()["done"].toInteger(), 1); // Local reconciliation remains valid while paused.
+        if (reopen) {
+            queue.reset();
+            queue = std::make_unique<WaveQueue>(data.filePath("peaks")); configure(*queue, data);
+            QVERIFY(!queue->preparation()["running"].toBool());
+        }
+        installRepair(*queue, [&](const Track &track, SourceRepairCompletion done) { done({mapped(data.path(), track)}); });
+        queue->prepareAll(0);
+        QTRY_VERIFY_WITH_TIMEOUT(queue->preparation()["complete"].toBool(), 5000);
+        QCOMPARE(queue->preparation()["done"].toInteger(), 2);
+        QCOMPARE(queue->preparation()["failed"].toInteger(), 0);
+        QCOMPARE(queue->preparation()["cursor"].toInteger(), tracks.last().id);
+    }
     void repairFailureIsCountedOnceAndContinuesPastEightFiles() {
         QTemporaryDir data;
         const auto tracks = seed(data.path(), 11);

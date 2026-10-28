@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <QThread>
 #include <QElapsedTimer>
+#include <QSqlQuery>
 
 struct Counts {
     std::atomic_int factories{0}, logins{0}, links{0}, downloads{0};
@@ -117,6 +118,26 @@ private slots:
         f.session.options.mountRoot="/unconfigured";c.configure(f.session);
         c.repair(f.tracks[1],[&](auto r){replies<<r;});QTRY_COMPARE(replies.size(),2);
         QVERIFY(!replies[1].paused);QVERIFY(!replies[1].needsConnection);QCOMPARE(f.counts->factories.load(),0);
+    }
+    void unconfiguredVolumesPathIsNotAssumedToBeNas(){
+        Fixture f;f.credentials();
+        Index index(f.profile+"/library.sqlite");QVERIFY(index.open());
+        const auto localRoot=QString("/Volumes/source-repair-unmounted-local-fixture/Music");
+        // Model a catalog retained after a local external disk was unmounted.
+        // No /Volumes directory or external media is created by this test.
+        {
+            auto db=QSqlDatabase::addDatabase("QSQLITE","volumes-fixture");
+            db.setDatabaseName(f.profile+"/library.sqlite");QVERIFY(db.open());
+            QSqlQuery query(db);query.prepare("UPDATE libraries SET root=? WHERE id='qa'");
+            query.addBindValue(localRoot);QVERIFY(query.exec());
+        }
+        QSqlDatabase::removeDatabase("volumes-fixture");
+        const auto track=index.trackByIdentity("qa",f.tracks[0].relativePath);QVERIFY(track.has_value());
+        f.session.options.mountRoot="/unconfigured";
+        SourceRepairCoordinator c(f.profile,f.profile+"/library.sqlite",nullptr,f.factory());c.configure(f.session);
+        bool done=false;SourceRepairReply reply;c.repair(*track,[&](auto r){reply=r;done=true;});QTRY_VERIFY(done);
+        QVERIFY(!reply.paused);QVERIFY(!reply.needsConnection);QVERIFY(!reply.error.isEmpty());
+        QCOMPARE(f.counts->factories.load(),0);
     }
 };
 QTEST_GUILESS_MAIN(SourceRepairCoordinatorTests)

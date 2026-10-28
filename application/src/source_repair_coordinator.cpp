@@ -6,6 +6,7 @@
 #include <QFutureWatcher>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QStorageInfo>
 #include <QTimer>
 #include <QtConcurrent>
 
@@ -119,7 +120,11 @@ void SourceRepairCoordinator::repair(const Track &track, SourceRepairCompletion 
         reply.error.clear();
         auto options = session.options;
         if (!within(track.root, options.mountRoot)) {
-            const bool nasPath = track.root.startsWith("/Volumes/");
+            // /Volumes also contains local USB/Thunderbolt disks. Only an
+            // identified network filesystem needs the NAS authorization flow.
+            const auto filesystem = QStorageInfo(track.root).fileSystemType().toLower();
+            const bool nasPath = filesystem.contains("smb") || filesystem.contains("cifs") ||
+                                 filesystem == "nfs" || filesystem == "afpfs" || filesystem == "webdav";
             reply.paused = reply.needsConnection = nasPath;
             reply.error = nasPath ? "请连接该素材库对应的 NAS 后继续自动处理" : "原件不可访问；该路径未配置 NAS 自动处理";
             return reply;
