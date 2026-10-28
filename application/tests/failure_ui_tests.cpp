@@ -8,6 +8,7 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPushButton>
 #include <QSignalSpy>
 #include <QTableWidget>
@@ -61,6 +62,22 @@ class FailureUiTests : public QObject {
         window.updateWorkPolicy();
     }
   private slots:
+    void pathRepairDialogExplainsHardlinksAndLocalFallback() {
+        QTemporaryDir data;
+        QVERIFY(seed(data.path()));
+        Window window(data.path()); window.show();
+        QTRY_VERIFY(window.indexReady_);
+        window.showWaveFailures();
+        auto *entry = window.failureDialog_->findChild<QPushButton *>("repairNasPaths");
+        QVERIFY(entry); entry->click();
+        auto *dialog = window.findChild<QDialog *>("nasPathRepairDialog");
+        QVERIFY(dialog);
+        QVERIFY(dialog->findChild<QLineEdit *>("pathRepairLocalCache"));
+        bool explains = false;
+        for (auto *label : dialog->findChildren<QLabel *>())
+            explains |= label->text().contains("硬链接") && label->text().contains("本机");
+        QVERIFY(explains);
+    }
     void referenceDiagnosticsKeepAccessAndDecodeCausesSeparate() {
         QTemporaryDir temporary;
         QVERIFY(seed(temporary.path()));

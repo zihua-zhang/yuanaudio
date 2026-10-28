@@ -17,7 +17,7 @@ QString verifiedMediaPath(const Track &track, QString *error,
     const auto expected = track.compatibleSha256.toLower();
     auto fail = [&] {
         if (error)
-            *error = "兼容副本的完整 SHA-256 校验未通过，请重新修复原曲路径。";
+            *error = "兼容文件的完整 SHA-256 校验未通过，请重新修复原曲路径。";
         return QString();
     };
     if (expected.size() != 64 || QByteArray::fromHex(expected).toHex() != expected ||

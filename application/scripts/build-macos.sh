@@ -143,6 +143,13 @@ mkdir -p "$legal_dir"
 cp "$project_dir/licenses/FFmpeg-LGPL-2.1.txt" "$legal_dir/"
 cp "$project_dir"/licenses/Qt-*.txt "$legal_dir/"
 cp "$project_dir/docs/macos-third-party.md" "$legal_dir/Third-Party-Notices.md"
+cp "$project_dir/third_party/libsmb2/LICENCE-LGPL-2.1.txt" "$legal_dir/libsmb2-LGPL-2.1.txt"
+cp "$project_dir/third_party/libsmb2/COPYING" "$legal_dir/libsmb2-COPYING"
+cp "$project_dir/third_party/libsmb2/UPSTREAM.md" "$legal_dir/libsmb2-UPSTREAM.md"
+# Ship the static library sources and application build inputs so this preview
+# can be rebuilt/relinked independently, without a source-request round trip.
+tar -czf "$legal_dir/Relink-Sources.tar.gz" -C "$project_dir" \
+  CMakeLists.txt src assets tests scripts docs licenses third_party
 
 if [[ -n "${APPLE_CODESIGN_IDENTITY:-}" ]]; then
   codesign --force --deep --options runtime --timestamp \

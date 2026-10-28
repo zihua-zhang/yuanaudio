@@ -276,7 +276,7 @@ static int buildWave(const QJsonObject &config) {
     if (compatible && (path.isEmpty() || !config.contains("indexedSize") ||
                        !config.contains("indexedModified") ||
                        verifiedMediaPath(media, &mediaError, verificationProgress).isEmpty()))
-        return failure(mediaError.isEmpty() ? QString("兼容副本缺少原曲索引版本，无法核验。") : mediaError,
+        return failure(mediaError.isEmpty() ? QString("兼容文件缺少原曲索引版本，无法核验。") : mediaError,
                        "compatible_unavailable");
     // Compatible views must not be published under the identity of an original on
     // another machine. Their provenance is local until separately verified there.
@@ -554,7 +554,7 @@ static int runPlayer(QCoreApplication &app) {
                     mediaFailed = true;
                     output({{"event", "error"}, {"generation", generation},
                             {"kind", "compatible_unavailable"},
-                            {"message", error.isEmpty() ? QString("兼容副本路径无效，请重新修复。") : error}});
+                            {"message", error.isEmpty() ? QString("兼容文件路径无效，请重新修复。") : error}});
                     return;
                 }
             }

@@ -495,7 +495,7 @@ Window::Window(const QString &root, const QString &legacyDatabase, const QString
     durationWriteRetry_.setSingleShot(true);
     connect(&durationWriteRetry_, &QTimer::timeout, this, &Window::flushDurationWrite);
     connect(table_, &TrackTable::viewportChanged, this, [this] { viewportDebounce_.start(); });
-    setWindowTitle("源音效管理工具 · 0.12.3");
+    setWindowTitle("源音效管理工具 · 0.12.4");
     resize(1320, 850);
     setMinimumSize(980, 640);
     debounce_.setSingleShot(true);
@@ -700,7 +700,7 @@ void Window::buildUi() {
     heading->setObjectName("brandTitle");
     heading->setFixedWidth(166);
     top->addWidget(heading);
-    heading->setToolTip("源音效管理工具 0.12.3 · 原文件工作流");
+    heading->setToolTip("源音效管理工具 0.12.4 · 原文件工作流");
     top->addSpacing(4);
     search_ = new QLineEdit;
     search_->setObjectName("musicSearch");
@@ -1832,8 +1832,8 @@ void Window::selectTrackValue(const Track &track, std::optional<double> ratio) {
     isPlaying_ = false;
     title_->setText(track.name);
     title_->setToolTip(track.name);
-    detail_->setText(track.compatiblePath.isEmpty() ? track.absolutePath() : "兼容副本 · " + track.sourcePath());
-    detail_->setToolTip(track.compatiblePath.isEmpty() ? track.absolutePath() : "原件：" + track.absolutePath() + "\n兼容副本：" + track.sourcePath());
+    detail_->setText(track.compatiblePath.isEmpty() ? track.absolutePath() : "兼容文件 · " + track.sourcePath());
+    detail_->setToolTip(track.compatiblePath.isEmpty() ? track.absolutePath() : "原件：" + track.absolutePath() + "\n兼容文件：" + track.sourcePath());
     const auto personalKey = QString::number(track.id) + ':' + WaveQueue::key(track);
     const bool personalPending = personalWritesInFlight_.contains(personalKey);
     tags_->setText(personalPending ? personalWritesInFlight_.value(personalKey) : track.tags);
@@ -2035,7 +2035,7 @@ void Window::handlePlayer(const QJsonObject &m) {
     playerResponse_.restart();
     if (m["event"] == "verifying") {
         playerLoading_ = true;
-        setStatus("正在核验兼容副本内容…");
+        setStatus("正在核验兼容文件内容…");
         return;
     }
     if (m["event"] == "position") {

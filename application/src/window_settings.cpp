@@ -90,7 +90,7 @@ void Window::buildSettings() {
     for (int row = 0; row < settingsNavigation_->count(); ++row)
         settingsNavigation_->item(row)->setSizeHint(QSize(140, 42));
     side->addWidget(settingsNavigation_, 1);
-    side->addWidget(textLabel("源音效管理工具\n0.12.3", "settingDetail"));
+    side->addWidget(textLabel("源音效管理工具\n0.12.4", "settingDetail"));
     body->addWidget(sidebar);
     settingsPages_ = new QStackedWidget;
     settingsPages_->setObjectName("settingsPages");
@@ -164,7 +164,7 @@ void Window::buildSettings() {
     setting(audio, "播放音量", "只影响本软件试听，不修改音乐文件。", volumeControl);
     playback->addStretch();
 
-    auto *cache = page("波形缓存", "已有波形优先复用，整首拖出使用原件；路径修复项使用已校验的兼容副本。", "cachePanel");
+    auto *cache = page("波形缓存", "已有波形优先复用，整首拖出使用原件；路径修复项使用已校验的兼容文件。", "cachePanel");
     auto *progressGroup = group(cache, "全库准备");
     auto *progress = textLabel("尚未准备全库", "wavePreparationStatus");
     progressGroup->addWidget(progress);
