@@ -121,4 +121,3 @@ private slots:
 };
 QTEST_GUILESS_MAIN(SourceRepairCoordinatorTests)
 #include "source_repair_coordinator_tests.moc"
-

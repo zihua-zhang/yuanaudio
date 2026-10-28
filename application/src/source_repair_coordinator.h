@@ -35,4 +35,3 @@ private:
     bool paused_ = false;
     quint64 epoch_ = 0;
 };
-
