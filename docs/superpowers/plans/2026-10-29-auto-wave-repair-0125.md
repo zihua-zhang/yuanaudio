@@ -42,12 +42,14 @@ Files: new source_repair_coordinator unit, window_path_repair.cpp/window.h, work
 - [x] RED runtime auth/no-secret persistence/session reuse, single NAS root, native repair and UI auth-once.
 - [x] Background serial coordinator wraps nativeSMB backend and existing runPathRepair; coalesces same key; holds credentials in parent only.
 - [x] Wire automatic handler, authorize-only dialog, resume unchanged batch/retry, mapped model/player refresh; pass verification cache to worker/player/drag.
-- [ ] Bump0.12.5, preserve data/rollback; full suite and proper build.
+- [x] Bump0.12.5, preserve data/rollback; full suite and proper build.
 
 ### Task 4 Private backup, verification and full cache run
-- [ ] Audit all pushed Git blobs/history for credentials/private keys/real media; create private repo, verify owner/visibility, connect remote, baseline tag.
-- [ ] Fresh whole-feature review, fix important findings via RED→GREEN, run full suite.
+- [x] Audit all pushed Git blobs/history for credentials/private keys/real media; create private repo, verify owner/visibility, connect remote, baseline tag.
+- [x] Fresh whole-feature review, fix important findings via RED→GREEN, run full suite.
 - [ ] Prescribed build, final installed plugin12/12 and actual mapped libraries; independent realNAS small auto flow including existing failures and repeated fingerprint reuse.
 - [ ] Install validated preview, source/DMG/logs/SHA, commit/tag/push private remote; verify unchanged formal libraries/favorites/tags.
 - [ ] Start existing failures retry then original full preparation automatically with runtime session; monitor until completion or explicit blocker, report actual cached/remaining counts.
 
+
+验收现状：完整构建37/37、Cocoa12/12及实际加载已通过；CLI真实NAS2/2和安装版静音定位播放已通过。GUI原生SMB受系统权限身份阻塞，明确未验收。两库后台缓存已启动，需以巡检记录的最终计数完成Task4。
