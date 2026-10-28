@@ -164,7 +164,7 @@ void Window::buildSettings() {
     setting(audio, "播放音量", "只影响本软件试听，不修改音乐文件。", volumeControl);
     playback->addStretch();
 
-    auto *cache = page("波形缓存", "已有波形优先复用，整首拖入达芬奇仍使用服务器原文件。", "cachePanel");
+    auto *cache = page("波形缓存", "已有波形优先复用，整首拖出使用原件；路径修复项使用已校验的兼容副本。", "cachePanel");
     auto *progressGroup = group(cache, "全库准备");
     auto *progress = textLabel("尚未准备全库", "wavePreparationStatus");
     progressGroup->addWidget(progress);

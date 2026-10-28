@@ -9,6 +9,7 @@
 #include <QSaveFile>
 #include <QSet>
 #include <QStorageInfo>
+#include <QThread>
 #include <QUuid>
 
 namespace {
@@ -35,18 +36,28 @@ bool noLinks(const QString &path) {
     return true;
 }
 QByteArray fileHash(const QString &path, QString *error) {
-    const QFileInfo before(path);
-    QFile file(path);
-    if (!before.isFile() || !noLinks(path) || !file.open(QIODevice::ReadOnly)) {
-        *error = "副本不可读取或是链接"; return {};
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const QFileInfo before(path);
+        const auto beforeSize = before.size();
+        const auto beforeModified = before.lastModified().toMSecsSinceEpoch();
+        QFile file(path);
+        if (!before.isFile() || !noLinks(path) || !file.open(QIODevice::ReadOnly)) {
+            *error = "副本不可读取或是链接"; return {};
+        }
+        QCryptographicHash hash(QCryptographicHash::Sha256);
+        if (!hash.addData(&file) || file.error() != QFileDevice::NoError) { *error = "副本校验读取失败"; return {}; }
+        const QFileInfo after(path);
+        if (after.size() != beforeSize || after.lastModified().toMSecsSinceEpoch() != beforeModified) {
+            // SMB may deliver the final write's attributes after close. Never accept
+            // an unstable pass: reopen and fully rehash after attributes settle.
+            if (attempt < 2) { file.close(); QThread::msleep(100); continue; }
+            *error = QString("副本在校验期间发生变化（字节 %1→%2，时间 %3→%4）")
+                .arg(beforeSize).arg(after.size()).arg(beforeModified).arg(after.lastModified().toMSecsSinceEpoch());
+            return {};
+        }
+        return hash.result().toHex();
     }
-    QCryptographicHash hash(QCryptographicHash::Sha256);
-    if (!hash.addData(&file) || file.error() != QFileDevice::NoError) { *error = "副本校验读取失败"; return {}; }
-    const QFileInfo after(path);
-    if (after.size() != before.size() || after.lastModified() != before.lastModified()) {
-        *error = "副本在校验期间发生变化"; return {};
-    }
-    return hash.result().toHex();
+    return {};
 }
 bool saveJson(const QString &path, const QJsonObject &data, QString *error) {
     QSaveFile file(path);

@@ -26,5 +26,7 @@
     <string>@YUANAUDIO_MACOS_MINIMUM@</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>连接你指定的局域网 NAS，读取路径异常的音频并校验兼容副本。</string>
 </dict>
 </plist>

@@ -19,6 +19,12 @@ QByteArray rsaEncrypt(const QByteArray &publicPem, const QByteArray &plain);
 // API tokens, download tokens or server response text are logged or persisted.
 class UgosClient {
   public:
+    enum class ConnectionState {
+        TimedOut = 0,
+        Ready = 1,
+        LocalNetworkDenied = 2,
+        Unreachable = 3
+    };
     UgosClient();
     ~UgosClient();
     UgosClient(const UgosClient &) = delete;
@@ -35,6 +41,10 @@ class UgosClient {
     bool lastDownloadStorageFailure() const { return downloadStorageFailure_; }
     void setTimeoutMs(int milliseconds);
     static bool validateEndpoint(const QUrl &endpoint, QString *error = nullptr);
+    // Synchronous background diagnostic. Connects TCP only to this endpoint,
+    // without HTTP, TLS negotiation or credentials; bounded to five seconds.
+    static ConnectionState connectionDiagnostic(const QUrl &endpoint,
+                                                 int timeoutMs = 5000);
 
   private:
     QUrl endpoint_;

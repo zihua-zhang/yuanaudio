@@ -241,6 +241,25 @@ class UgosClientTests : public QObject {
                                 "http://127.0.0.1/?token=x", "http://127.0.0.1/#x"})
             QVERIFY2(!UgosClient::validateEndpoint(QUrl(url)),url);
     }
+    void nativeConnectionProbeUsesOnlyTheRequestedLoopbackEndpoint() {
+        FakeNas nas;
+        bool qtAccepted = false;
+        connect(&nas,&QTcpServer::newConnection,this,[&] { qtAccepted = true; });
+        QElapsedTimer timer;
+        timer.start();
+        QCOMPARE(int(UgosClient::connectionDiagnostic(nas.url(),1500)),1);
+        QVERIFY(timer.elapsed()<1500);
+        // TCP handshake completes in the kernel/Network queue; no Qt event
+        // loop is needed and no HTTP payload or credentials are transmitted.
+        QVERIFY(!qtAccepted);
+        QCOMPARE(nas.requests,0);
+        const auto closedEndpoint = nas.url();
+        nas.close();
+        QCOMPARE(int(UgosClient::connectionDiagnostic(closedEndpoint,1500)),3);
+        QCOMPARE(int(UgosClient::connectionDiagnostic(QUrl("http://8.8.8.8"),100)),3);
+        // Actual localNetworkDenied needs the signed GUI app and an OS privacy
+        // decision. Loopback and a Terminal-launched test cannot emulate it.
+    }
     void rsaSupportsBothPemContainersAndRejectsInvalidInput() {
         FakeNas nas;
         const QByteArray plain("synthetic RSA plaintext");

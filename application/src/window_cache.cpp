@@ -51,7 +51,7 @@ void Window::configureSharedCache(const QString &libraryId) {
     row->addWidget(browse);
     layout->addLayout(row);
     auto *hint = new QLabel("选择空的专用文件夹，或同事已建立的波形缓存文件夹。可以放在音乐目录内，收录会跳过"
-                            "它。\n现有索引、收藏和标签保留；整首拖入达芬奇仍引用服务器原文件。");
+                            "它。\n现有索引、收藏和标签保留；整首拖出使用原件；路径修复项使用已校验的兼容副本。");
     hint->setWordWrap(true);
     layout->addWidget(hint);
     auto *result = new QLabel;

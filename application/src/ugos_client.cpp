@@ -1,5 +1,6 @@
 #include "ugos_client.h"
 #include <QCryptographicHash>
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
 #include <QHostAddress>
@@ -29,6 +30,7 @@ int ugos_open(const unsigned char *, int, const unsigned char *, int,
 int ugos_rsa_encrypt(const unsigned char *, int, const unsigned char *, int,
                      unsigned char **, int *);
 void ugos_release(unsigned char *, int);
+int ugos_probe_network(const unsigned char *, int, unsigned short, int);
 }
 #endif
 
@@ -99,11 +101,14 @@ struct HttpResult {
     QMap<QByteArray,QByteArray> headers;
     bool ok = false;
     bool writeFailed = false;
+    bool connectivityProbed = false;
+    UgosClient::ConnectionState connectionState = UgosClient::ConnectionState::TimedOut;
 };
 HttpResult http(const QUrl &url, const QByteArray &method, const QByteArray &body,
                  const QMap<QByteArray,QByteArray> &headers, int timeout,
                  QString *error, QFile *destination = nullptr,
-                 QCryptographicHash *digest = nullptr) {
+                 QCryptographicHash *digest = nullptr,
+                 bool diagnoseUnreachable = true) {
     HttpResult result;
     QNetworkAccessManager manager;
     manager.setProxy(QNetworkProxy::NoProxy);
@@ -173,9 +178,44 @@ HttpResult http(const QUrl &url, const QByteArray &method, const QByteArray &bod
     else if (status >= 300 && status < 400)
         fail(error,QStringLiteral("NAS 返回重定向，已停止请求。"));
     else if (reply->error() != QNetworkReply::NoError || status < 200 || status >= 300)
-        fail(error,QStringLiteral("NAS 网络请求失败（HTTP %1）。").arg(status));
+    {
+        auto detail = status == 0 ? reply->errorString().left(1024) : QString();
+        detail.replace(QRegularExpression("https?://[^\\s]+"), "[NAS]");
+        detail.replace(QRegularExpression("[A-Za-z0-9+/=_-]{24,}"), "[已省略]");
+        fail(error,QStringLiteral("NAS 网络请求失败（HTTP %1，网络错误 %2）。%3%4")
+            .arg(status).arg(int(reply->error()))
+            .arg(detail.isEmpty() ? QString() : detail.left(180) + "。")
+            .arg(status == 0 ? QStringLiteral("请检查 NAS 地址、网络连接与系统的本地网络权限。") : QString()));
+    }
     else result.ok = true;
+    const bool probe = diagnoseUnreachable && status == 0
+        && reply->error() == QNetworkReply::UnknownNetworkError
+        && reply->errorString().contains("Host unreachable",Qt::CaseInsensitive);
     delete reply;
+    if (probe) {
+        QUrl origin;
+        origin.setScheme(url.scheme());
+        origin.setHost(url.host());
+        origin.setPort(url.port());
+        result.connectivityProbed = true;
+        result.connectionState = UgosClient::connectionDiagnostic(origin);
+        QString hint;
+        switch (result.connectionState) {
+        case UgosClient::ConnectionState::Ready:
+            hint = QStringLiteral("当前 NAS TCP 已可连接，可重试此操作。");
+            break;
+        case UgosClient::ConnectionState::LocalNetworkDenied:
+            hint = QStringLiteral("macOS 已拒绝当前应用的本地网络访问。请在系统设置的“隐私与安全性→本地网络”中允许此版本后重试。");
+            break;
+        case UgosClient::ConnectionState::Unreachable:
+            hint = QStringLiteral("系统连接检查仍未建立 TCP 连接，请检查 NAS 地址、设备在线状态和局域网路由。");
+            break;
+        case UgosClient::ConnectionState::TimedOut:
+            hint = QStringLiteral("系统连接检查超时；若刚允许了本地网络访问，请重试。");
+            break;
+        }
+        if (error) *error += hint;
+    }
     return result;
 }
 QJsonObject parseJson(const QByteArray &data, QString *error) {
@@ -308,6 +348,30 @@ bool UgosClient::resolveLocalEndpoint(QString *error) const {
     if (!finished || !allowed) fail(error,QStringLiteral("NAS 主机名未解析为局域网地址。"));
     return finished && allowed;
 }
+UgosClient::ConnectionState UgosClient::connectionDiagnostic(const QUrl &endpoint,
+                                                            int timeoutMs) {
+    if (!validateEndpoint(endpoint)) return ConnectionState::Unreachable;
+#ifdef Q_OS_MACOS
+    const int budget = std::clamp(timeoutMs,100,5000);
+    QElapsedTimer elapsed;
+    elapsed.start();
+    UgosClient resolver;
+    resolver.endpoint_ = endpoint;
+    resolver.timeoutMs_ = budget;
+    if (!resolver.resolveLocalEndpoint(nullptr))
+        return elapsed.elapsed() >= budget ? ConnectionState::TimedOut : ConnectionState::Unreachable;
+    const int remaining = budget - int(elapsed.elapsed());
+    if (remaining <= 0) return ConnectionState::TimedOut;
+    const auto host = endpoint.host().toUtf8();
+    const int port = endpoint.port(endpoint.scheme() == "https" ? 443 : 80);
+    const int result = ugos_probe_network(bytes(host),host.size(),
+                                           static_cast<unsigned short>(port),remaining);
+    if (result >= 0 && result <= 3) return static_cast<ConnectionState>(result);
+#else
+    Q_UNUSED(timeoutMs);
+#endif
+    return ConnectionState::Unreachable;
+}
 QJsonObject UgosClient::plainJson(QString method, QString api, QJsonObject body, QString *error) {
     auto response = http(apiUrl(endpoint_,api),method.toLatin1(),
                          QJsonDocument(body).toJson(QJsonDocument::Compact),
@@ -325,9 +389,17 @@ bool UgosClient::login(QUrl endpoint, QString username, QString password, QStrin
         fail(error,QStringLiteral("请输入普通 NAS 用户账号和密码；初始化 admin 账号不受支持。"));
         return false;
     }
-    auto check = http(apiUrl(endpoint_,"v1/verify/check"),"POST",
-        QJsonDocument(QJsonObject{{"username",username}}).toJson(QJsonDocument::Compact),
+    const auto checkBody = QJsonDocument(QJsonObject{{"username",username}})
+                               .toJson(QJsonDocument::Compact);
+    auto check = http(apiUrl(endpoint_,"v1/verify/check"),"POST",checkBody,
         baseHeaders(clientId_),timeoutMs_,error);
+    if (!check.ok && check.connectivityProbed && check.connectionState == ConnectionState::Ready) {
+        // Only the initial read-only key check can be replayed after a privacy
+        // prompt is resolved. Never replay the login or an authenticated POST.
+        clearError(error);
+        check = http(apiUrl(endpoint_,"v1/verify/check"),"POST",checkBody,
+                     baseHeaders(clientId_),timeoutMs_,error,nullptr,nullptr,false);
+    }
     if (!check.ok) return false;
     const auto pem = QByteArray::fromBase64(check.headers.value("x-rsa-token"));
     auto passwordBytes = password.toUtf8();

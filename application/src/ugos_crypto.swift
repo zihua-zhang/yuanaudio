@@ -1,6 +1,74 @@
 import Foundation
 import CryptoKit
 import Security
+import Network
+
+private final class NetworkProbeState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var final: Int32 = 0
+    private var waiting: Int32 = 0
+    let finished = DispatchSemaphore(value:0)
+    func noteWaiting(_ value: Int32) {
+        lock.lock()
+        if final == 0 { waiting = value }
+        lock.unlock()
+    }
+    func complete(_ value: Int32) {
+        lock.lock()
+        let notify = final == 0
+        if notify { final = value }
+        lock.unlock()
+        if notify { finished.signal() }
+    }
+    func result() -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        return final != 0 ? final : waiting
+    }
+}
+
+// Only a TCP handshake to the exact configured host/port. This runs within the
+// signed GUI process, whose local-network privilege differs from Terminal's.
+@_cdecl("ugos_probe_network")
+public func probeNetwork(_ host: UnsafePointer<UInt8>?, _ hostLength: Int32,
+                         _ port: UInt16, _ timeoutMs: Int32) -> Int32 {
+    guard hostLength > 0, hostLength <= 1024, port > 0,
+          let hostData = data(host,hostLength),
+          let host = String(data:hostData,encoding:.utf8),
+          !host.contains("\0"), let endpointPort = NWEndpoint.Port(rawValue:port)
+          else { return 3 }
+    let state = NetworkProbeState()
+    let connection = NWConnection(host:NWEndpoint.Host(host),port:endpointPort,using:.tcp)
+    connection.pathUpdateHandler = { path in
+        if path.status == .unsatisfied {
+            state.noteWaiting(path.unsatisfiedReason == .localNetworkDenied ? 2 : 3)
+        }
+    }
+    connection.stateUpdateHandler = { [weak connection] update in
+        switch update {
+        case .ready:
+            state.complete(1)
+        case .waiting(_):
+            let denied = connection?.currentPath?.unsatisfiedReason == .localNetworkDenied
+            state.noteWaiting(denied ? 2 : 3)
+            // Do not cancel here. The normal privacy dialog may be pending;
+            // approving it can cause this connection to become ready.
+        case .failed(_):
+            let denied = connection?.currentPath?.unsatisfiedReason == .localNetworkDenied
+            state.complete(denied || state.result() == 2 ? 2 : 3)
+        default:
+            break
+        }
+    }
+    connection.start(queue:DispatchQueue(label:"com.audiolibrary.ugos.network-probe",qos:.utility))
+    let bounded = max(1,min(5000,Int(timeoutMs)))
+    _ = state.finished.wait(timeout:.now() + .milliseconds(bounded))
+    let outcome = state.result()
+    connection.stateUpdateHandler = nil
+    connection.pathUpdateHandler = nil
+    connection.cancel()
+    return outcome
+}
 
 // C ABI only. Buffers belong to the bridge until ugos_release(). No input
 // values appear in errors; no key material is persisted or sent to a process.
