@@ -704,6 +704,127 @@ class QueuePolicyTests : public QObject {
         QCOMPARE(result["total"].toInteger(), 1);
         QCOMPARE(result["items"].toArray()[0].toObject()["category"].toString(), QString("damaged"));
     }
+    void fullLibraryContinuesPastEightUnavailableSources_data() {
+        QTest::addColumn<int>("concurrency");
+        QTest::newRow("serial") << 1;
+        QTest::newRow("two-workers") << 2;
+        QTest::newRow("four-workers") << 4;
+    }
+    void fullLibraryContinuesPastEightUnavailableSources() {
+        QFETCH(int, concurrency);
+        QTemporaryDir data;
+        QStringList names;
+        for (int i = 0; i < 10; ++i)
+            names << QString("%1-missing.wav").arg(i, 2, 10, QChar('0'));
+        names << "99-readable.wav";
+        QVERIFY(writeWav(data.filePath(names.last())));
+        const auto tracks = seed(data.path(), names);
+        QCOMPARE(tracks.size(), 11);
+        WaveQueue queue(data.filePath("peaks"));
+        queue.configurePreparation(data.filePath("library.sqlite"), data.filePath("progress.json"));
+        queue.setPreparationConcurrency(concurrency);
+        queue.prepareAll(0);
+        QTRY_VERIFY(queue.preparation()["complete"].toBool() ||
+                    (!queue.preparation()["running"].toBool() &&
+                     queue.preparation()["failed"].toInteger() > 0));
+        QVERIFY2(queue.preparation()["complete"].toBool(),
+                 qPrintable(queue.preparation()["error"].toString()));
+        QCOMPARE(queue.preparation()["done"].toInteger(), 1);
+        QCOMPARE(queue.preparation()["failed"].toInteger(), 10);
+        QCOMPARE(queue.preparation()["total"].toInteger(), 11);
+        QCOMPARE(queue.preparation()["failures"].toArray().size(), 10);
+        QVERIFY(queue.preparation()["error"].toString().isEmpty());
+        QTRY_COMPARE(queue.preparation()["knownFailures"].toInteger(), 10);
+        QTRY_COMPARE(checkpoint(data.path())["cursor"].toInteger(), tracks.last().id);
+        QCOMPARE(checkpoint(data.path())["failed"].toInteger(), 10);
+        WaveData wave;
+        QVERIFY(loadWaveView(data.filePath("peaks"), WaveQueue::key(tracks.last()), &wave));
+        FailureStore store(storePath(data.path()), data.filePath("library.sqlite"));
+        QString error;
+        QVERIFY2(store.open(&error), qPrintable(error));
+        const auto records = store.page(0, 100, {}, false, &error)["items"].toArray();
+        QCOMPARE(records.size(), 10);
+        for (const auto &record : records)
+            QCOMPARE(record.toObject()["kind"].toString(), QString("source_unavailable"));
+    }
+    void failedRetryContinuesPastEightUnavailableSources() {
+        QTemporaryDir data;
+        QStringList names;
+        for (int i = 0; i < 10; ++i)
+            names << QString("%1-missing.wav").arg(i, 2, 10, QChar('0'));
+        names << "99-repaired.wav";
+        QVERIFY(writeWav(data.filePath(names.last())));
+        const auto tracks = seed(data.path(), names);
+        QCOMPARE(tracks.size(), 11);
+        QVERIFY(failures(data.path(), tracks));
+        WaveQueue queue(data.filePath("peaks"));
+        queue.configurePreparation(data.filePath("library.sqlite"), data.filePath("progress.json"));
+        QTRY_VERIFY(queue.preparation()["failuresReady"].toBool());
+        queue.batchDone_ = 27;
+        queue.batchFailed_ = 11;
+        queue.batchTotal_ = 38;
+        queue.retryFailed(0);
+        QTRY_VERIFY(queue.preparation()["retryComplete"].toBool() ||
+                    (!queue.preparation()["running"].toBool() &&
+                     queue.preparation()["retryDone"].toInteger() > 0));
+        QVERIFY2(queue.preparation()["retryComplete"].toBool(),
+                 qPrintable(queue.preparation()["error"].toString()));
+        QCOMPARE(queue.preparation()["retryDone"].toInteger(), 11);
+        QCOMPARE(queue.preparation()["retryFailed"].toInteger(), 10);
+        QCOMPARE(queue.preparation()["retryTotal"].toInteger(), 11);
+        QCOMPARE(queue.preparation()["retryCursor"], queue.preparation()["retryUpper"]);
+        QCOMPARE(queue.preparation()["done"].toInteger(), 27);
+        QCOMPARE(queue.preparation()["failed"].toInteger(), 11);
+        QCOMPARE(queue.preparation()["total"].toInteger(), 38);
+        QVERIFY(queue.preparation()["error"].toString().isEmpty());
+        QTRY_COMPARE(queue.preparation()["knownFailures"].toInteger(), 10);
+        QTRY_COMPARE(checkpoint(data.path())["retryDone"].toInteger(), 11);
+        QCOMPARE(checkpoint(data.path())["retryFailed"].toInteger(), 10);
+        WaveData wave;
+        QVERIFY(loadWaveView(data.filePath("peaks"), WaveQueue::key(tracks.last()), &wave));
+    }
+    void storageFullStillPausesPreparation_data() {
+        QTest::addColumn<bool>("retry");
+        QTest::newRow("full-library") << false;
+        QTest::newRow("failed-retry") << true;
+    }
+    void storageFullStillPausesPreparation() {
+        QFETCH(bool, retry);
+        QTemporaryDir data;
+        const auto tracks = seed(data.path(), {"full.wav", "next.wav"});
+        QCOMPARE(tracks.size(), 2);
+        WaveQueue queue(data.filePath("peaks"));
+        queue.configurePreparation(data.filePath("library.sqlite"), data.filePath("progress.json"));
+        QTRY_VERIFY(queue.preparation()["failuresReady"].toBool());
+        queue.setWorkContext(true, false, false);
+        queue.batchRunning_ = true;
+        auto &entry = queue.entries_[WaveQueue::key(tracks[0])];
+        entry.failed = true;
+        entry.failureKind = "storage_full";
+        entry.message = "本机缓存盘剩余空间不足 2 GiB，已停止新增缓存。";
+        if (retry) {
+            queue.retryMode_ = true;
+            queue.retryPage_.append({1, tracks[0], "source_unavailable", "原件暂不可访问", false});
+            queue.retryPage_.append({2, tracks[1], "source_unavailable", "原件暂不可访问", false});
+            queue.advanceRetry(tracks[0], false, false);
+            QCOMPARE(queue.preparation()["retryDone"].toInteger(), 1);
+            QCOMPARE(queue.preparation()["retryFailed"].toInteger(), 1);
+            QCOMPARE(queue.retryPage_.size(), 1);
+        } else {
+            queue.batchPage_.append({tracks[0], 0});
+            queue.batchPage_.append({tracks[1], 0});
+            queue.advanceBatch(tracks[0], false);
+            QCOMPARE(queue.preparation()["failed"].toInteger(), 1);
+            QCOMPARE(queue.preparation()["cursor"].toInteger(), tracks[0].id);
+            QCOMPARE(queue.batchPage_.size(), 1);
+        }
+        QVERIFY(!queue.preparation()["running"].toBool());
+        QVERIFY(!queue.preparation()["complete"].toBool());
+        QVERIFY(!queue.preparation()["error"].toString().isEmpty());
+        QTRY_COMPARE(queue.preparation()["knownFailures"].toInteger(), 1);
+        QTRY_VERIFY(!queue.failureWriting_ && !queue.checkpointDirty_);
+        QVERIFY(!checkpoint(data.path())["running"].toBool());
+    }
     void failedRetryCursorResumesAfterApplicationRestart() {
         QTemporaryDir data;
         QStringList names;

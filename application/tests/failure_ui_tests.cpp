@@ -233,6 +233,7 @@ class FailureUiTests : public QObject {
         window.showWaveFailures();
         auto *dialog = window.failureDialog_.data();
         QVERIFY(dialog);
+        QVERIFY(dialog->findChild<QPushButton *>("repairNasPaths"));
         auto *table = dialog->findChild<QTableWidget *>("failureRecords");
         auto *category = dialog->findChild<QComboBox *>("failureCategory");
         auto *kind = dialog->findChild<QComboBox *>("failureRecordKind");

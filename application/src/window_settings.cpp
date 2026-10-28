@@ -90,7 +90,7 @@ void Window::buildSettings() {
     for (int row = 0; row < settingsNavigation_->count(); ++row)
         settingsNavigation_->item(row)->setSizeHint(QSize(140, 42));
     side->addWidget(settingsNavigation_, 1);
-    side->addWidget(textLabel("源音效管理工具\n0.12.2", "settingDetail"));
+    side->addWidget(textLabel("源音效管理工具\n0.12.3", "settingDetail"));
     body->addWidget(sidebar);
     settingsPages_ = new QStackedWidget;
     settingsPages_->setObjectName("settingsPages");

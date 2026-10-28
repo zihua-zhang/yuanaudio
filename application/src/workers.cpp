@@ -2,6 +2,7 @@
 #include "cache.h"
 #include "decoder.h"
 #include "index.h"
+#include "media_source.h"
 #include <QAudioOutput>
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -250,13 +251,40 @@ static QByteArray fingerprint(const QString &path) {
     }
     return hash.result().toHex();
 }
+static bool hasCompatibleSource(const QJsonObject &config) {
+    return !config["compatibleSha256"].toString().isEmpty() ||
+           !config["compatiblePath"].toString().isEmpty();
+}
+static Track compatibleTrack(const QJsonObject &config) {
+    Track track;
+    track.compatiblePath = config["path"].toString();
+    track.compatibleSha256 = config["compatibleSha256"].toString().toLatin1();
+    track.compatibleSize = config["compatibleSize"].toInteger(-1);
+    track.compatibleModified = config["compatibleModified"].toInteger(-1);
+    return track;
+}
 static int buildWave(const QJsonObject &config) {
-    const auto path = config["path"].toString(), local = config["local"].toString(),
-               shared = config["shared"].toString();
+    const auto path = config["path"].toString(), local = config["local"].toString();
+    const bool compatible = hasCompatibleSource(config);
+    const auto media = compatibleTrack(config);
+    const auto verificationProgress = [](qint64 bytes) {
+        output({{"event", "reading"}, {"phase", "verification"}, {"bytes", bytes}});
+    };
+    QString mediaError;
+    // This guard precedes every cache/publication fast path, including publish_existing.
+    // The copy's mtime is independent of the indexed original version.
+    if (compatible && (path.isEmpty() || !config.contains("indexedSize") ||
+                       !config.contains("indexedModified") ||
+                       verifiedMediaPath(media, &mediaError, verificationProgress).isEmpty()))
+        return failure(mediaError.isEmpty() ? QString("兼容副本缺少原曲索引版本，无法核验。") : mediaError,
+                       "compatible_unavailable");
+    // Compatible views must not be published under the identity of an original on
+    // another machine. Their provenance is local until separately verified there.
+    const auto shared = compatible ? QString() : config["shared"].toString();
     const auto sharedLibrary = config["sharedLibrary"].toString().isEmpty()
                                    ? config["library"].toString()
                                    : config["sharedLibrary"].toString();
-    if (config["operation"].toString() == "publish_existing") {
+    if (!compatible && config["operation"].toString() == "publish_existing") {
         if (shared.isEmpty() || !config.contains("indexedSize") || !config.contains("indexedModified"))
             return failure("尚未配置共享缓存或缺少索引版本信息。", "shared_cache_write");
         const auto size = config["indexedSize"].toInteger(), stamp = config["indexedModified"].toInteger();
@@ -300,7 +328,7 @@ static int buildWave(const QJsonObject &config) {
     if (!before.isFile())
         return accessFailure();
     const auto stamp = before.lastModified().toMSecsSinceEpoch(), size = before.size();
-    const auto signature = fingerprint(path);
+    const auto signature = compatible ? media.compatibleSha256.toLower() : fingerprint(path);
     if (signature.isEmpty())
         return accessFailure();
     const auto key =
@@ -308,14 +336,19 @@ static int buildWave(const QJsonObject &config) {
                 config["relative"].toString() + "|" + QString::fromLatin1(signature), size, stamp);
     const auto sharedKey = waveKey(
         sharedLibrary, config["relative"].toString() + "|" + QString::fromLatin1(signature), size, stamp);
-    const auto versionKey = waveKey(config["library"].toString(), config["relative"].toString(), size, stamp);
+    const auto versionSize = compatible ? config["indexedSize"].toInteger() : size;
+    const auto versionModified = compatible ? config["indexedModified"].toInteger() : stamp;
+    const auto versionKey = waveKey(config["library"].toString(), config["relative"].toString(),
+                                    versionSize, versionModified);
     const bool matchesIndex =
-        (!config.contains("indexedSize") || config["indexedSize"].toInteger() == size) &&
-        (!config.contains("indexedModified") || config["indexedModified"].toInteger() == stamp);
+        compatible || ((!config.contains("indexedSize") || config["indexedSize"].toInteger() == size) &&
+                       (!config.contains("indexedModified") || config["indexedModified"].toInteger() == stamp));
     WaveData cached;
     bool stored = false;
     QJsonObject diagnostics;
     auto sourceStable = [&] {
+        if (compatible)
+            return !verifiedMediaPath(media, nullptr, verificationProgress).isEmpty();
         const QFileInfo current(path);
         return current.isFile() && current.size() == size &&
                current.lastModified().toMSecsSinceEpoch() == stamp && fingerprint(path) == signature;
@@ -438,8 +471,9 @@ static int buildWave(const QJsonObject &config) {
     const bool interruptedRead = diagnostics["stopKind"].toString() == "source_unavailable";
     // A disconnected source cannot be re-fingerprinted. Preserve its already decoded
     // samples as a labelled local reference, but never publish them as verified audio.
-    if ((after.isFile() && (after.size() != size || after.lastModified().toMSecsSinceEpoch() != stamp)) ||
-        (!interruptedRead && fingerprint(path) != signature))
+    if ((compatible && !sourceStable()) ||
+        (after.isFile() && (after.size() != size || after.lastModified().toMSecsSinceEpoch() != stamp)) ||
+        (!compatible && !interruptedRead && fingerprint(path) != signature))
         return failure("音乐在生成过程中发生变化，请重新选择。", "source_changed");
     if (damagedPackets) {
         const auto seconds = QString::number(diagnostics["decodedMs"].toInteger() / 1000.0, 'f', 2);
@@ -510,6 +544,20 @@ static int runPlayer(QCoreApplication &app) {
             playWhenReady = m["autoplay"].toBool();
             player = std::make_unique<QMediaPlayer>();
             player->setAudioOutput(&audio);
+            if (hasCompatibleSource(m)) {
+                QString error;
+                const auto verificationProgress = [current = generation](qint64 bytes) {
+                    output({{"event", "verifying"}, {"generation", current}, {"bytes", bytes}});
+                };
+                if (m["path"].toString().isEmpty() ||
+                    verifiedMediaPath(compatibleTrack(m), &error, verificationProgress).isEmpty()) {
+                    mediaFailed = true;
+                    output({{"event", "error"}, {"generation", generation},
+                            {"kind", "compatible_unavailable"},
+                            {"message", error.isEmpty() ? QString("兼容副本路径无效，请重新修复。") : error}});
+                    return;
+                }
+            }
             QObject::connect(
                 player.get(), &QMediaPlayer::playbackStateChanged, &app,
                 [current = generation, instance = player.get(), &timer](QMediaPlayer::PlaybackState s) {

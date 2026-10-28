@@ -2,6 +2,7 @@
 #include "workers.h"
 #include <QApplication>
 #include <QCheckBox>
+#include <QCryptographicHash>
 #include <QDataStream>
 #include <QDateTime>
 #include <QDialog>
@@ -82,6 +83,26 @@ class WindowTests : public QObject {
         return db.upsert(tracks);
     }
   private slots:
+    void compatibleMappingReloadsAlreadySelectedOriginal() {
+        QTemporaryDir data;
+        QVERIFY(seed(data.path(), {"missing.wav"}));
+        const auto copyPath = data.filePath("compatible.wav");
+        QVERIFY(writeWav(copyPath));
+        Window window(data.path()); window.show();
+        QTRY_VERIFY(window.indexReady_);
+        Index db(data.filePath("library.sqlite")); QVERIFY(db.open());
+        const auto original = *db.trackByIdentity("qa", "missing.wav");
+        window.selectTrackValue(original);
+        const auto generation = window.selectionGeneration_;
+        QFile copy(copyPath); QVERIFY(copy.open(QIODevice::ReadOnly));
+        const auto sha = QCryptographicHash::hash(copy.readAll(), QCryptographicHash::Sha256);
+        QVERIFY(db.setCompatibleSource(original, copyPath, sha));
+        const auto mapped = *db.trackByIdentity("qa", "missing.wav");
+        window.waveNeedsRetry_ = false;
+        window.selectTrackValue(mapped, .25);
+        QCOMPARE(window.selected_.compatiblePath, copyPath);
+        QVERIFY(window.selectionGeneration_ > generation);
+    }
     void waveDragExportsPressedRowWithoutCueingOrChangingSelection() {
         TrackModel model;
         Track a, b;
@@ -153,7 +174,7 @@ class WindowTests : public QObject {
         QCOMPARE(cues.size(), 1);
         QCOMPARE(table.drags, 0);
     }
-    void unavailableSourcesStillPauseInsteadOfFailingTheWholeLibrary() {
+    void unavailableSourcesAreAllRecordedWithoutPausingTheLibrary() {
         QTemporaryDir data;
         QStringList names;
         for (int i = 0; i < 10; ++i)
@@ -162,10 +183,12 @@ class WindowTests : public QObject {
         WaveQueue queue(data.filePath("peaks"));
         queue.configurePreparation(data.filePath("library.sqlite"), data.filePath("progress.json"));
         queue.prepareAll();
-        QTRY_VERIFY(!queue.preparation()["running"].toBool());
-        QCOMPARE(queue.preparation()["failed"].toInteger(), 8);
-        QVERIFY(!queue.preparation()["complete"].toBool());
-        QVERIFY(!queue.preparation()["error"].toString().isEmpty());
+        QTRY_VERIFY(queue.preparation()["complete"].toBool());
+        QVERIFY(!queue.preparation()["running"].toBool());
+        QCOMPARE(queue.preparation()["done"].toInteger(), 0);
+        QCOMPARE(queue.preparation()["failed"].toInteger(), 10);
+        QTRY_COMPARE(queue.preparation()["knownFailures"].toInteger(), 10);
+        QVERIFY(queue.preparation()["error"].toString().isEmpty());
     }
     void silentWorkerTimesOutAndNextFileContinues() {
         QTemporaryDir data;
@@ -246,12 +269,21 @@ class WindowTests : public QObject {
         QVERIFY(toggle && panel);
         QVERIFY(!panel->isVisible());
         window.waveQueue_->prepareAll();
-        QTRY_VERIFY(!window.waveQueue_->preparation()["running"].toBool());
-        QVERIFY(!window.waveQueue_->preparation()["error"].toString().isEmpty());
-        QVERIFY(toggle->text().contains("处理"));
+        QTRY_VERIFY(window.waveQueue_->preparation()["complete"].toBool());
+        QVERIFY(!window.waveQueue_->preparation()["running"].toBool());
+        QCOMPARE(window.waveQueue_->preparation()["failed"].toInteger(), 10);
+        QTRY_COMPARE(window.waveQueue_->preparation()["knownFailures"].toInteger(), 10);
+        QVERIFY(window.waveQueue_->preparation()["error"].toString().isEmpty());
+        QVERIFY(toggle->text().contains("异常"));
         QVERIFY(!panel->isVisible());
         toggle->click();
         QVERIFY(panel->isVisible());
+        QSignalSpy pages(window.waveQueue_, &WaveQueue::failurePageReady);
+        window.waveQueue_->requestFailurePage();
+        QTRY_VERIFY(!pages.isEmpty());
+        const auto page = pages.last()[0].toJsonObject();
+        QCOMPARE(page["total"].toInteger(), 10);
+        QCOMPARE(page["items"].toArray().size(), 10);
     }
     void userCanSkipOneSlowFileWithoutStoppingPreparation() {
         QTemporaryDir data;

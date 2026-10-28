@@ -39,7 +39,7 @@ class WaveQueue : public QObject {
     void setVisible(const QList<Track> &tracks);
     void select(const Track &track, bool retry = false);
     void invalidate();
-    void refreshIndex();
+    void refreshIndex(bool membershipChanged = true);
     const RowWave *find(const Track &track) const;
     static QString key(const Track &track);
     void configurePreparation(const QString &database, const QString &stateFile);
@@ -134,7 +134,6 @@ class WaveQueue : public QObject {
     qint64 activeRate_ = 0;
     bool batchRunning_ = false, batchComplete_ = false, batchLoading_ = false, batchActive_ = false;
     bool catalogNeedsReview_ = false;
-    int consecutiveFailures_ = 0;
     quint64 batchEpoch_ = 0;
     void fetchBatch();
     void savePreparation();

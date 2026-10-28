@@ -326,6 +326,7 @@ void Window::setupWorkspace(QVBoxLayout *left) {
     workspaceToggle_->setToolTip("候选清单、最近试听与常用目录 · 只保存在本机");
     left->addWidget(workspaceToggle_);
     workspace_ = new WorkspacePanel(QDir(dataRoot_).filePath("workspace.sqlite"), this);
+    workspace_->setCatalogPath(databasePath_);
     workspace_->setMaximumHeight(230);
     left->addWidget(workspace_);
     const auto settingsPath = QDir(dataRoot_).filePath("workspace-ui.ini");

@@ -50,6 +50,8 @@ class TrackModel : public QAbstractTableModel {
     QMimeData *mimeData(const QModelIndexList &indexes) const override;
     QStringList mimeTypes() const override;
     Qt::DropActions supportedDragActions() const override;
+    void setCatalogPath(const QString &path) { catalogPath_ = path; }
+    QString catalogPath() const { return catalogPath_; }
     void replace(QList<Track> values);
     void append(QList<Track> values);
     void setWaveQueue(const WaveQueue *queue) {
@@ -61,6 +63,7 @@ class TrackModel : public QAbstractTableModel {
   private:
     const WaveQueue *waveQueue_ = nullptr; // Display-only duration hints for visible cached waves.
     QHash<qint64, int> rowsById_;
+    QString catalogPath_;
 };
 class TrackTable : public QTableView {
     Q_OBJECT
@@ -266,6 +269,7 @@ class Window : public QMainWindow {
     bool eventFilter(QObject *object, QEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
     void refreshSearch(bool append = false);
+    void showNasPathRepair();
     void addLibrary();
     void beginScan(const Library &library);
     void selectTrack(int row, std::optional<double> ratio = std::nullopt);

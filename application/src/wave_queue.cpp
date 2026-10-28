@@ -145,7 +145,7 @@ bool WaveQueue::hasBackgroundWork() const {
     }
     return false;
 }
-void WaveQueue::refreshIndex() {
+void WaveQueue::refreshIndex(bool membershipChanged) {
     // A committed catalog update changes scheduling, not the validity of every cached view.
     // Versioned keys naturally separate changed files; unchanged views stay immediately usable.
     batchRunning_ = false;
@@ -158,7 +158,8 @@ void WaveQueue::refreshIndex() {
     // longer authoritative; rebuild it from active records on the next start.
     retryUpper_ = 0;
     batchComplete_ = false;
-    catalogNeedsReview_ = true;
+    if (membershipChanged)
+        catalogNeedsReview_ = true;
     ++*localEpoch_;
     localChecked_.clear();
     entries_.clear();
@@ -406,7 +407,6 @@ void WaveQueue::prepareAll(qint64 rate, bool restart) {
     batchRunning_ = true;
     if (backgroundJobRate() != activeRate_ && active_.id && background_)
         cancel();
-    consecutiveFailures_ = 0;
     preparationError_.clear();
     savePreparation();
     if (batchPage_.isEmpty())
@@ -577,7 +577,6 @@ void WaveQueue::startRetry(bool references, qint64 rate) {
     retryReferences_ = references;
     retryComplete_ = false;
     batchRunning_ = true;
-    consecutiveFailures_ = 0;
     preparationError_.clear();
     if (rate >= 0)
         batchRate_ = preparationRate(rate);
@@ -665,16 +664,13 @@ void WaveQueue::advanceRetry(const Track &track, bool success, bool reference) {
     if (!success) {
         ++retryFailed_;
         const auto entry = entries_.value(key(track));
-        const auto category = FailureStore::category(entry.failureKind);
-        const bool isolated = category == "damaged" || category == "unsupported" || category == "changed" ||
-                              category == "skipped";
-        consecutiveFailures_ = isolated ? 0 : consecutiveFailures_ + 1;
-        if (entry.failureKind == "storage_full" || consecutiveFailures_ >= 8) {
+        // A failed original is recorded and the remaining retry range still runs.
+        // Exhausted local cache storage is a batch-wide condition that must stop writes.
+        if (entry.failureKind == "storage_full") {
             batchRunning_ = false;
-            preparationError_ = "连续异常，已暂停本次重试；检查网络与缓存盘后继续。";
+            preparationError_ = entry.message;
         }
-    } else
-        consecutiveFailures_ = 0;
+    }
     persistOutcome(track, success, reference, id);
     savePreparation();
 }
@@ -828,7 +824,6 @@ void WaveQueue::advanceBatch(const Track &track, bool success, bool reference) {
         ++batchDone_;
         if (reference)
             ++batchReference_;
-        consecutiveFailures_ = 0;
     } else {
         ++batchFailed_;
         const auto entry = entries_.value(key(track));
@@ -842,15 +837,10 @@ void WaveQueue::advanceBatch(const Track &track, bool success, bool reference) {
                                            {"time", QDateTime::currentDateTime().toString(Qt::ISODate)}});
         while (recentFailures_.size() > 100)
             recentFailures_.removeFirst();
-        // Invalid content belongs to this file, not the entire connection or cache drive.
-        const bool fileSpecific =
-            kind == "invalid_audio" || kind == "source_changed" || kind == "manual_skip";
-        consecutiveFailures_ = fileSpecific ? 0 : consecutiveFailures_ + 1;
-        if (kind == "storage_full" || consecutiveFailures_ >= 8) {
-            preparationError_ =
-                kind == "storage_full"
-                    ? entry.message
-                    : "连续 8 首无法读取或保存，已暂停；检查网络与缓存盘后继续。异常详情可查看具体文件。";
+        // Source access/read failures and other per-file failures must not prevent
+        // later originals from being prepared, even when many fail consecutively.
+        if (kind == "storage_full") {
+            preparationError_ = entry.message;
             batchRunning_ = false;
         }
     }
@@ -1185,7 +1175,11 @@ void WaveQueue::schedule() {
             sharedLibrary = l.sharedId;
         }
     const QJsonObject config{
-        {"path", next.absolutePath()},
+        {"path", next.sourcePath()},
+        {"compatiblePath", next.compatiblePath},
+        {"compatibleSha256", QString::fromLatin1(next.compatibleSha256)},
+        {"compatibleSize", next.compatibleSize},
+        {"compatibleModified", next.compatibleModified},
         {"relative", next.relativePath},
         {"library", next.libraryId},
         {"local", localCache_},

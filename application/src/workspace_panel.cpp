@@ -1,4 +1,5 @@
 #include "workspace_panel.h"
+#include "media_drag.h"
 #include <QComboBox>
 #include <QCursor>
 #include <QDrag>
@@ -11,6 +12,7 @@
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSignalBlocker>
+#include <QToolTip>
 #include <QVBoxLayout>
 
 void WorkspaceTrackList::setTrackRows(const QList<Track> &tracks) {
@@ -19,7 +21,7 @@ void WorkspaceTrackList::setTrackRows(const QList<Track> &tracks) {
     setDragEnabled(true);
     for (const auto &track : tracks_) {
         auto *item = new QListWidgetItem(track.name + "\n" + track.folder, this);
-        item->setToolTip(track.name + "\n" + track.absolutePath() + "\n双击试听 · 拖出整首原文件");
+        item->setToolTip(track.name + "\n" + track.absolutePath() + "\n双击试听 · 拖出整首音频");
         item->setSizeHint(QSize(0, 40));
     }
 }
@@ -44,19 +46,32 @@ QMimeData *WorkspaceTrackList::originalMimeData() const {
             selected << tracks_[index];
     }
     if (!selected.isEmpty())
-        mime->setUrls(originalFileUrls(selected));
+        mime->setUrls(mediaFileUrls(selected, catalogPath_));
     return mime;
 }
 void WorkspaceTrackList::startDrag(Qt::DropActions) {
-    auto *mime = originalMimeData();
-    if (!mime->hasUrls()) {
-        delete mime;
+    QList<Track> selected;
+    for (const auto *item : selectedItems()) {
+        const auto index = row(item);
+        if (index >= 0 && index < tracks_.size())
+            selected.append(tracks_[index]);
+    }
+    QString error;
+    const auto urls = prepareMediaDragUrls(this, selected, catalogPath_, &error);
+    if (urls.isEmpty()) {
+        if (!error.isEmpty())
+            QToolTip::showText(QCursor::pos(), error, this);
         return;
     }
+    auto *mime = new QMimeData;
+    mime->setUrls(urls);
     auto *drag = new QDrag(this);
     drag->setMimeData(mime);
     drag->exec(Qt::CopyAction, Qt::CopyAction);
     drag->deleteLater();
+}
+void WorkspacePanel::setCatalogPath(const QString &path) {
+    rows_->setCatalogPath(path);
 }
 
 WorkspacePanel::WorkspacePanel(const QString &databasePath, QWidget *parent)
@@ -220,7 +235,7 @@ void WorkspacePanel::refresh() {
         notice_->setText(mode == Folders ? QString("%1 个目录 · 双击定位").arg(rows_->count())
                                          : QString("%1 首 · 双击试听 / 拖出").arg(rows_->count()));
         notice_->setToolTip(mode == Folders ? "双击定位左侧文件夹；移除只影响常用目录记录。"
-                                            : "双击试听；拖动整首原文件到剪辑软件，音乐原件保持原位。");
+                                            : "双击试听；拖动整首音频到剪辑软件，音乐原件保持原位。");
     } else {
         notice_->setText(mode == Folders  ? "右键文件夹加入常用目录"
                          : mode == Recent ? "最近试听 · 最多 100 首"

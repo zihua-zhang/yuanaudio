@@ -68,6 +68,11 @@ void Window::showWaveFailures() {
         category->addItem(categoryLabel(QString::fromLatin1(id)), QString::fromLatin1(id));
     bar->addWidget(category);
     bar->addStretch();
+    auto *repairPaths = new QPushButton("批量处理路径问题…");
+    repairPaths->setObjectName("repairNasPaths");
+    repairPaths->setToolTip("通过 NAS 读取原件，创建并校验兼容副本；保留原件与已有波形");
+    bar->addWidget(repairPaths);
+    connect(repairPaths, &QPushButton::clicked, this, &Window::showNasPathRepair);
     auto *retry = new QPushButton("只重试失败");
     retry->setObjectName("retryFailedWaves");
     bar->addWidget(retry);

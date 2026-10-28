@@ -1,4 +1,5 @@
 #include "window.h"
+#include "media_drag.h"
 #include "preference_switch.h"
 #include "theme.h"
 #include "appearance.h"
@@ -261,7 +262,7 @@ QMimeData *TrackModel::mimeData(const QModelIndexList &indexes) const {
             values << tracks[i.row()];
         }
     auto *mime = new QMimeData;
-    mime->setUrls(originalFileUrls(values));
+    mime->setUrls(mediaFileUrls(values, catalogPath_));
     return mime;
 }
 void TrackModel::replace(QList<Track> values) {
@@ -294,12 +295,35 @@ void TrackModel::append(QList<Track> values) {
         rowsById_.insert(tracks[row].id, row);
     endInsertRows();
 }
+static QMimeData *verifiedRowMime(TrackTable *table, const QModelIndexList &rows) {
+    auto *model = qobject_cast<TrackModel *>(table->model());
+    if (!model)
+        return nullptr;
+    QList<Track> tracks;
+    QSet<int> seen;
+    for (const auto &row : rows)
+        if (row.isValid() && row.row() >= 0 && row.row() < model->tracks.size() && !seen.contains(row.row())) {
+            seen.insert(row.row());
+            tracks.append(model->tracks[row.row()]);
+        }
+    QString error;
+    const auto urls = prepareMediaDragUrls(table, tracks, model->catalogPath(), &error);
+    if (urls.isEmpty()) {
+        if (!error.isEmpty())
+            QToolTip::showText(QCursor::pos(), error, table);
+        return nullptr;
+    }
+    auto *mime = new QMimeData;
+    mime->setUrls(urls);
+    return mime;
+}
 void TrackTable::startDrag(Qt::DropActions) {
     if (!selectionModel() || selectionModel()->selectedRows().isEmpty())
         return;
     const auto rows = selectionModel()->selectedRows();
-    executeFileDrag(model()->mimeData(rows),
-                    model()->index(rows.first().row(), TrackModel::Name).data().toString());
+    const auto label = model()->index(rows.first().row(), TrackModel::Name).data().toString();
+    if (auto *mime = verifiedRowMime(this, rows))
+        executeFileDrag(mime, label);
 }
 void TrackTable::executeFileDrag(QMimeData *mime, const QString &label) {
     if (!mime || !mime->hasUrls()) {
@@ -348,8 +372,9 @@ void TrackTable::mouseMoveEvent(QMouseEvent *e) {
                 QApplication::startDragDistance()) {
             const QModelIndex pressed = pressedWave_;
             pressedWave_ = QModelIndex(); // Consume before the native drag's nested event loop.
-            executeFileDrag(model()->mimeData({pressed}),
-                            model()->index(pressed.row(), TrackModel::Name).data().toString());
+            const auto label = model()->index(pressed.row(), TrackModel::Name).data().toString();
+            if (auto *mime = verifiedRowMime(this, {pressed}))
+                executeFileDrag(mime, label);
         }
         e->accept();
         return;
@@ -470,7 +495,7 @@ Window::Window(const QString &root, const QString &legacyDatabase, const QString
     durationWriteRetry_.setSingleShot(true);
     connect(&durationWriteRetry_, &QTimer::timeout, this, &Window::flushDurationWrite);
     connect(table_, &TrackTable::viewportChanged, this, [this] { viewportDebounce_.start(); });
-    setWindowTitle("源音效管理工具 · 0.12.2");
+    setWindowTitle("源音效管理工具 · 0.12.3");
     resize(1320, 850);
     setMinimumSize(980, 640);
     debounce_.setSingleShot(true);
@@ -675,7 +700,7 @@ void Window::buildUi() {
     heading->setObjectName("brandTitle");
     heading->setFixedWidth(166);
     top->addWidget(heading);
-    heading->setToolTip("源音效管理工具 0.12.2 · 原文件工作流");
+    heading->setToolTip("源音效管理工具 0.12.3 · 原文件工作流");
     top->addSpacing(4);
     search_ = new QLineEdit;
     search_->setObjectName("musicSearch");
@@ -913,6 +938,7 @@ void Window::buildUi() {
     autoPlay_->setChecked(false);
     layout->addLayout(line);
     model_ = new TrackModel(this);
+    model_->setCatalogPath(databasePath_);
     model_->setWaveQueue(waveQueue_);
     table_ = new TrackTable;
     table_->setObjectName("musicTable");
@@ -1784,6 +1810,9 @@ void Window::selectTrackValue(const Track &track, std::optional<double> ratio) {
     }
     ++workspaceRequest_;
     if (track.id == selected_.id && track.size == selected_.size && track.modified == selected_.modified &&
+        track.root == selected_.root && track.compatiblePath == selected_.compatiblePath &&
+        track.compatibleSha256 == selected_.compatibleSha256 &&
+        track.compatibleSize == selected_.compatibleSize && track.compatibleModified == selected_.compatibleModified &&
         !waveNeedsRetry_) {
         if (ratio) {
             waveQueue_->select(track, true);
@@ -1803,8 +1832,8 @@ void Window::selectTrackValue(const Track &track, std::optional<double> ratio) {
     isPlaying_ = false;
     title_->setText(track.name);
     title_->setToolTip(track.name);
-    detail_->setText(track.absolutePath());
-    detail_->setToolTip(track.absolutePath());
+    detail_->setText(track.compatiblePath.isEmpty() ? track.absolutePath() : "兼容副本 · " + track.sourcePath());
+    detail_->setToolTip(track.compatiblePath.isEmpty() ? track.absolutePath() : "原件：" + track.absolutePath() + "\n兼容副本：" + track.sourcePath());
     const auto personalKey = QString::number(track.id) + ':' + WaveQueue::key(track);
     const bool personalPending = personalWritesInFlight_.contains(personalKey);
     tags_->setText(personalPending ? personalWritesInFlight_.value(personalKey) : track.tags);
@@ -1816,7 +1845,11 @@ void Window::selectTrackValue(const Track &track, std::optional<double> ratio) {
     time_->setText("0:00 / 0:00");
     waveStatus_->setText("正在准备波形，可先试听");
     QJsonObject load{{"op", "load"},
-                     {"path", track.absolutePath()},
+                     {"path", track.sourcePath()},
+                     {"compatiblePath", track.compatiblePath},
+                     {"compatibleSha256", QString::fromLatin1(track.compatibleSha256)},
+                     {"compatibleSize", track.compatibleSize},
+                     {"compatibleModified", track.compatibleModified},
                      {"generation", qint64(generation)},
                      {"autoplay", ratio.has_value() || autoPlay_->isChecked()},
                      {"volume", volume_->value() / 100.0}};
@@ -1937,7 +1970,11 @@ void Window::sendPlayer(QJsonObject command) {
     }
     if (!player_ && command["op"] != "load" && selected_.id) {
         const QJsonObject reload{{"op", "load"},
-                                 {"path", selected_.absolutePath()},
+                                 {"path", selected_.sourcePath()},
+                                 {"compatiblePath", selected_.compatiblePath},
+                                 {"compatibleSha256", QString::fromLatin1(selected_.compatibleSha256)},
+                                 {"compatibleSize", selected_.compatibleSize},
+                                 {"compatibleModified", selected_.compatibleModified},
                                  {"generation", qint64(selectionGeneration_)},
                                  {"autoplay", false},
                                  {"volume", volume_->value() / 100.0}};
@@ -1995,6 +2032,12 @@ void Window::sendPlayer(QJsonObject command) {
 void Window::handlePlayer(const QJsonObject &m) {
     if (quint64(m["generation"].toInteger()) != selectionGeneration_)
         return;
+    playerResponse_.restart();
+    if (m["event"] == "verifying") {
+        playerLoading_ = true;
+        setStatus("正在核验兼容副本内容…");
+        return;
+    }
     if (m["event"] == "position") {
         playerLoading_ = false;
         position_ = m["position"].toInteger();

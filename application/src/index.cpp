@@ -1,5 +1,6 @@
 #include "index.h"
 #include "file_publication.h"
+#include <QCryptographicHash>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -76,12 +77,13 @@ bool Index::open(QString *error) {
         if (!q.exec("PRAGMA foreign_keys=ON"))
             return fail(q.lastError().text());
         if (version == 6)
-            return true;
+            return upgradeCompatibleSources(error);
         if (version >= 4)
-            return upgradeCatalogExclusions(error);
+            return upgradeCatalogExclusions(error) && upgradeCompatibleSources(error);
         if (version == 2 && !upgradeFolders(error))
             return false;
-        return upgradeSharedIdentity(error, version == 3) && upgradeCatalogExclusions(error);
+        return upgradeSharedIdentity(error, version == 3) && upgradeCatalogExclusions(error) &&
+               upgradeCompatibleSources(error);
     }
     const QStringList schema = {
         "PRAGMA journal_mode=WAL",
@@ -104,7 +106,23 @@ bool Index::open(QString *error) {
     for (const auto &sql : schema)
         if (!q.exec(sql))
             return fail(q.lastError().text());
-    return upgradeFolders(error) && upgradeSharedIdentity(error) && upgradeCatalogExclusions(error);
+    return upgradeFolders(error) && upgradeSharedIdentity(error) && upgradeCatalogExclusions(error) &&
+           upgradeCompatibleSources(error);
+}
+bool Index::upgradeCompatibleSources(QString *error) {
+    // Additive extension: 0.12.2 can still reopen the catalog and ignore this table.
+    // Do not alter existing track rows or raise PRAGMA user_version.
+    QSqlQuery q(db_);
+    if (q.exec("CREATE TABLE IF NOT EXISTS compatible_sources("
+               "library TEXT NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,"
+               "relative TEXT NOT NULL,original_root TEXT NOT NULL,original_size INTEGER NOT NULL,"
+               "original_modified INTEGER NOT NULL,path TEXT NOT NULL,size INTEGER NOT NULL,"
+               "modified INTEGER NOT NULL,sha256 TEXT NOT NULL,PRIMARY KEY(library,relative))"))
+        return true;
+    error_ = q.lastError().text();
+    if (error)
+        *error = error_;
+    return false;
 }
 bool Index::upgradeSharedIdentity(QString *error, bool makeBackup) {
     QSqlQuery q(db_);
@@ -524,7 +542,10 @@ std::optional<Track> Index::trackByIdentity(const QString &library, const QStrin
     QSqlQuery q(db_);
     q.prepare(
         "SELECT t.id,t.library,t.relative,t.name,t.folder,t.size,t.modified,t.duration,t.favorite,"
-        "t.tags,l.root FROM tracks t JOIN libraries l ON l.id=t.library WHERE t.library=? AND t.relative=?");
+        "t.tags,l.root,c.path,c.size,c.modified,c.sha256 FROM tracks t JOIN libraries l ON l.id=t.library "
+        "LEFT JOIN compatible_sources c ON c.library=t.library AND c.relative=t.relative "
+        "AND c.original_size=t.size AND c.original_modified=t.modified AND c.original_root=l.root "
+        "WHERE t.library=? AND t.relative=?");
     q.addBindValue(library);
     q.addBindValue(relative);
     if (!q.exec()) {
@@ -545,7 +566,95 @@ std::optional<Track> Index::trackByIdentity(const QString &library, const QStrin
     t.favorite = q.value(8).toBool();
     t.tags = q.value(9).toString();
     t.root = q.value(10).toString();
+    t.compatiblePath = q.value(11).toString();
+    t.compatibleSize = q.value(12).toLongLong();
+    t.compatibleModified = q.value(13).toLongLong();
+    t.compatibleSha256 = q.value(14).toByteArray();
     return t;
+}
+bool Index::setCompatibleSource(const Track &original, const QString &path, const QByteArray &sha256,
+                                QString *error) {
+    error_.clear();
+    if (error)
+        error->clear();
+    auto fail = [&](const QString &message) {
+        error_ = message;
+        if (error)
+            *error = message;
+        return false;
+    };
+    QByteArray expected = sha256;
+    if (expected.size() == 32)
+        expected = expected.toHex();
+    else
+        expected = expected.toLower();
+    if (expected.size() != 64 || QByteArray::fromHex(expected).toHex() != expected ||
+        original.id <= 0 || original.libraryId.isEmpty() || original.root.isEmpty() ||
+        !validCatalogPath(original.relativePath) || path.isEmpty() || !QDir::isAbsolutePath(path))
+        return fail("兼容副本路径、原曲身份或 SHA-256 校验值无效，原有映射保持不变。");
+    const QFileInfo before(path);
+    if (!before.isFile() || before.isSymbolicLink())
+        return fail("兼容副本不存在、不可读取或是链接，原有映射保持不变。");
+    const auto copyPath = QDir::cleanPath(before.absoluteFilePath());
+    const auto size = before.size();
+    const auto modified = before.lastModified().toMSecsSinceEpoch();
+    QFile file(copyPath);
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    if (!file.open(QIODevice::ReadOnly) || !hash.addData(&file) ||
+        file.error() != QFileDevice::NoError || hash.result().toHex() != expected)
+        return fail("兼容副本完整 SHA-256 校验失败，原有映射保持不变。");
+    file.close();
+    const QFileInfo after(copyPath);
+    if (!after.isFile() || after.isSymbolicLink() || after.size() != size ||
+        after.lastModified().toMSecsSinceEpoch() != modified)
+        return fail("兼容副本在核验期间发生变化，请重新修复。");
+    QSqlQuery q(db_);
+    if (!q.exec("BEGIN IMMEDIATE"))
+        return fail(q.lastError().text());
+    auto rollback = [&](const QString &message) {
+        db_.rollback();
+        return fail(message);
+    };
+    // Full hashing happens before taking the write lock. Check the current catalog
+    // identity under that lock so a stale repair cannot overwrite a newly scanned song.
+    q.prepare("SELECT 1 FROM tracks t JOIN libraries l ON l.id=t.library "
+              "WHERE t.id=? AND t.library=? AND t.relative=? AND t.size=? AND t.modified=? AND l.root=?");
+    q.addBindValue(original.id);
+    q.addBindValue(original.libraryId);
+    q.addBindValue(original.relativePath);
+    q.addBindValue(original.size);
+    q.addBindValue(original.modified);
+    q.addBindValue(original.root);
+    if (!q.exec())
+        return rollback(q.lastError().text());
+    if (!q.next())
+        return rollback("原曲的索引版本或素材库目录已变化，未保存过期修复结果。");
+    q.finish();
+    const QFileInfo current(copyPath);
+    if (!current.isFile() || current.isSymbolicLink() || current.size() != size ||
+        current.lastModified().toMSecsSinceEpoch() != modified)
+        return rollback("兼容副本在保存映射前发生变化，请重新修复。");
+    q.prepare("INSERT INTO compatible_sources(library,relative,original_root,original_size,"
+              "original_modified,path,size,modified,sha256) VALUES(?,?,?,?,?,?,?,?,?) "
+              "ON CONFLICT(library,relative) DO UPDATE SET original_root=excluded.original_root,"
+              "original_size=excluded.original_size,original_modified=excluded.original_modified,"
+              "path=excluded.path,size=excluded.size,modified=excluded.modified,sha256=excluded.sha256");
+    q.addBindValue(original.libraryId);
+    q.addBindValue(original.relativePath);
+    q.addBindValue(original.root);
+    q.addBindValue(original.size);
+    q.addBindValue(original.modified);
+    q.addBindValue(copyPath);
+    q.addBindValue(size);
+    q.addBindValue(modified);
+    q.addBindValue(QString::fromLatin1(expected));
+    if (!q.exec())
+        return rollback(q.lastError().text());
+    if (!q.exec("UPDATE index_state SET generation=generation+1 WHERE id=1"))
+        return rollback(q.lastError().text());
+    if (!db_.commit())
+        return rollback(db_.lastError().text());
+    return true;
 }
 bool Index::upsert(const QList<Track> &tracks, QString *error, bool *filesChanged) {
     if (filesChanged)
@@ -563,7 +672,7 @@ bool Index::upsert(const QList<Track> &tracks, QString *error, bool *filesChange
     if (!transaction.exec("BEGIN IMMEDIATE"))
         return fail(transaction.lastError().text());
     QSqlQuery find(db_), insert(db_), update(db_), eraseFts(db_), insertFts(db_);
-    QSqlQuery archived(db_), occupiedId(db_), eraseArchive(db_);
+    QSqlQuery archived(db_), occupiedId(db_), eraseArchive(db_), invalidateCompatible(db_);
     find.prepare("SELECT id,size,modified,tags FROM tracks WHERE library=? AND relative=?");
     insert.prepare("INSERT INTO tracks(id,library,relative,name,folder,size,modified,duration,favorite,tags,"
                    "search_text,name_norm) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)");
@@ -572,6 +681,8 @@ bool Index::upsert(const QList<Track> &tracks, QString *error, bool *filesChange
     occupiedId.prepare("SELECT id FROM tracks WHERE id=?");
     eraseArchive.prepare("DELETE FROM excluded_track_metadata WHERE library=? AND relative=?");
     update.prepare("UPDATE tracks SET size=?,modified=?,duration=0 WHERE id=?");
+    invalidateCompatible.prepare("DELETE FROM compatible_sources WHERE library=? AND relative=? "
+                                 "AND (original_size<>? OR original_modified<>?)");
     eraseFts.prepare("DELETE FROM search_fts WHERE rowid=?");
     insertFts.prepare("INSERT INTO search_fts(rowid,tokens) VALUES(?,?)");
     bool changed = false;
@@ -596,6 +707,12 @@ bool Index::upsert(const QList<Track> &tracks, QString *error, bool *filesChange
             return fail("素材相对路径无效");
         if (excluded[t.libraryId].excludesTrack(t.relativePath))
             continue;
+        invalidateCompatible.bindValue(0, t.libraryId);
+        invalidateCompatible.bindValue(1, t.relativePath);
+        invalidateCompatible.bindValue(2, t.size);
+        invalidateCompatible.bindValue(3, t.modified);
+        if (!invalidateCompatible.exec())
+            return fail(invalidateCompatible.lastError().text());
         find.bindValue(0, t.libraryId);
         find.bindValue(1, t.relativePath);
         if (!find.exec())
@@ -732,7 +849,10 @@ SearchPage Index::readSearch(const QString &query, const QString &library, const
     const auto terms = normalized.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
     QString sql = "SELECT "
                   "t.id,t.library,t.relative,t.name,t.folder,t.size,t.modified,t.duration,t.favorite,t.tags,"
-                  "l.root FROM tracks t JOIN libraries l ON l.id=t.library WHERE 1=1";
+                  "l.root,c.path,c.size,c.modified,c.sha256 FROM tracks t JOIN libraries l ON l.id=t.library "
+                  "LEFT JOIN compatible_sources c ON c.library=t.library AND c.relative=t.relative "
+                  "AND c.original_size=t.size AND c.original_modified=t.modified AND c.original_root=l.root "
+                  "WHERE 1=1";
     QList<QVariant> binds;
     if (!terms.isEmpty()) {
         sql += " AND t.id IN (SELECT rowid FROM search_fts WHERE search_fts MATCH ?)";
@@ -806,6 +926,10 @@ SearchPage Index::readSearch(const QString &query, const QString &library, const
         t.duration = q.value(7).toLongLong();
         t.favorite = q.value(8).toBool();
         t.tags = q.value(9).toString();
+        t.compatiblePath = q.value(11).toString();
+        t.compatibleSize = q.value(12).toLongLong();
+        t.compatibleModified = q.value(13).toLongLong();
+        t.compatibleSha256 = q.value(14).toByteArray();
         page.tracks << t;
     }
     if (q.lastError().isValid()) {
@@ -907,8 +1031,11 @@ qint64 Index::countForLibrary(const QString &library) const {
 }
 QList<Track> Index::tracksAfter(qint64 id, int limit) const {
     QSqlQuery q(db_);
-    q.prepare("SELECT t.id,t.library,t.relative,t.name,t.folder,t.size,t.modified,t.duration,l.root "
-              "FROM tracks t JOIN libraries l ON l.id=t.library WHERE t.id>? ORDER BY t.id LIMIT ?");
+    q.prepare("SELECT t.id,t.library,t.relative,t.name,t.folder,t.size,t.modified,t.duration,l.root,"
+              "c.path,c.size,c.modified,c.sha256 FROM tracks t JOIN libraries l ON l.id=t.library "
+              "LEFT JOIN compatible_sources c ON c.library=t.library AND c.relative=t.relative "
+              "AND c.original_size=t.size AND c.original_modified=t.modified AND c.original_root=l.root "
+              "WHERE t.id>? ORDER BY t.id LIMIT ?");
     q.addBindValue(id);
     q.addBindValue(qBound(1, limit, 200));
     QList<Track> tracks;
@@ -927,6 +1054,10 @@ QList<Track> Index::tracksAfter(qint64 id, int limit) const {
         t.modified = q.value(6).toLongLong();
         t.duration = q.value(7).toLongLong();
         t.root = q.value(8).toString();
+        t.compatiblePath = q.value(9).toString();
+        t.compatibleSize = q.value(10).toLongLong();
+        t.compatibleModified = q.value(11).toLongLong();
+        t.compatibleSha256 = q.value(12).toByteArray();
         tracks << t;
     }
     return tracks;
@@ -1175,6 +1306,22 @@ QString Index::lastError() const {
 }
 QString Track::absolutePath() const {
     return QDir(root).filePath(relativePath);
+}
+QString Track::sourcePath() const {
+    return compatiblePath.isEmpty() ? absolutePath() : compatiblePath;
+}
+bool Track::sourceMatches(QString *error) const {
+    if (error)
+        error->clear();
+    if (compatiblePath.isEmpty())
+        return true;
+    const QFileInfo copy(compatiblePath);
+    if (copy.isFile() && !copy.isSymbolicLink() && copy.size() == compatibleSize &&
+        copy.lastModified().toMSecsSinceEpoch() == compatibleModified && compatibleSha256.size() == 64)
+        return true;
+    if (error)
+        *error = "兼容副本已丢失或发生变化，请重新修复原曲路径。";
+    return false;
 }
 QList<QUrl> originalFileUrls(const QList<Track> &tracks) {
     QList<QUrl> out;

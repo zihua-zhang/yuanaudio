@@ -15,12 +15,14 @@ class WorkspaceTrackList : public QListWidget {
     void setTrackRows(const QList<Track> &tracks);
     void setFolderRows(const QList<PinnedFolder> &folders);
     QMimeData *originalMimeData() const;
+    void setCatalogPath(const QString &path) { catalogPath_ = path; }
 
   protected:
     void startDrag(Qt::DropActions supportedActions) override;
 
   private:
     QList<Track> tracks_;
+    QString catalogPath_;
 };
 
 class WorkspacePanel : public QWidget {
@@ -29,6 +31,7 @@ class WorkspacePanel : public QWidget {
     enum Mode { Candidates, Recent, Folders };
     explicit WorkspacePanel(const QString &databasePath, QWidget *parent = nullptr);
     WorkspaceStore &store();
+    void setCatalogPath(const QString &path);
     bool addCandidate(const Track &track);
     bool recordAudition(const Track &track);
     bool pinFolder(const QString &libraryId, const QString &path, const QString &name,

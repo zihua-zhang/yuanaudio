@@ -1,4 +1,5 @@
 #pragma once
+#include <QByteArray>
 #include <QList>
 #include <QSet>
 #include <QSqlDatabase>
@@ -17,7 +18,16 @@ struct Track {
     QString libraryId, relativePath, name, folder, root, tags;
     qint64 size = 0, modified = 0, duration = 0;
     bool favorite = false;
+    // Indexed identity remains the original. These fields describe only a separately
+    // verified, optional compatible copy used by audio consumers.
+    QString compatiblePath;
+    qint64 compatibleSize = 0, compatibleModified = 0;
+    QByteArray compatibleSha256;
     QString absolutePath() const;
+    QString sourcePath() const;
+    // Cheap compatible-copy check. Does not probe SMB originals or rehash content;
+    // audio consumers perform the full hash check off the UI thread before use.
+    bool sourceMatches(QString *error = nullptr) const;
 };
 struct SearchPage {
     QList<Track> tracks;
@@ -64,6 +74,8 @@ class Index {
                            QString *error = nullptr);
     QList<Library> libraries() const;
     std::optional<Track> trackByIdentity(const QString &libraryId, const QString &relativePath) const;
+    bool setCompatibleSource(const Track &original, const QString &path, const QByteArray &sha256,
+                             QString *error = nullptr);
     bool upsert(const QList<Track> &tracks, QString *error = nullptr, bool *filesChanged = nullptr);
     SearchPage search(const QString &query, const QString &libraryId = {}, const QString &folder = {},
                       bool favorites = false, int offset = 0, int limit = 50,
@@ -100,6 +112,7 @@ class Index {
     bool upgradeFolders(QString *error);
     bool upgradeSharedIdentity(QString *error, bool makeBackup = false);
     bool upgradeCatalogExclusions(QString *error);
+    bool upgradeCompatibleSources(QString *error);
     bool changeCatalog(const QString &libraryId, const QString &relativePath, const QString &kind,
                        QString *error);
     FolderPage readFolders(const QString &where, const QList<QVariant> &binds, const QString &order,

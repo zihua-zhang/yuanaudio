@@ -74,7 +74,7 @@ bool FailureStore::open(QString *error) {
     return true;
 }
 QString FailureStore::category(const QString &kind) {
-    if (kind == "source_unavailable" || kind == "network")
+    if (kind == "source_unavailable" || kind == "compatible_unavailable" || kind == "network")
         return "network";
     if (kind == "unsupported" || kind == "unsupported_format")
         return "unsupported";
@@ -130,8 +130,11 @@ bool FailureStore::currentTracks(QList<FailureRecord> *records, QString *error) 
     if (!attachCatalog(error))
         return false;
     QSqlQuery q(db_);
-    if (!q.prepare("SELECT t.id,t.name,t.folder,t.size,t.modified,t.duration,t.tags,t.favorite,l.root "
+    if (!q.prepare("SELECT t.id,t.name,t.folder,t.size,t.modified,t.duration,t.tags,t.favorite,l.root,"
+                   "c.path,c.size,c.modified,c.sha256 "
                    "FROM catalog.tracks t JOIN catalog.libraries l ON l.id=t.library "
+                   "LEFT JOIN catalog.compatible_sources c ON c.library=t.library AND c.relative=t.relative "
+                   "AND c.original_size=t.size AND c.original_modified=t.modified AND c.original_root=l.root "
                    "WHERE t.library=? AND t.relative=?"))
         return sqlError(q, error);
     QList<FailureRecord> current;
@@ -151,6 +154,10 @@ bool FailureStore::currentTracks(QList<FailureRecord> *records, QString *error) 
             t.tags = q.value(6).toString();
             t.favorite = q.value(7).toBool();
             t.root = q.value(8).toString();
+            t.compatiblePath = q.value(9).toString();
+            t.compatibleSize = q.value(10).toLongLong();
+            t.compatibleModified = q.value(11).toLongLong();
+            t.compatibleSha256 = q.value(12).toByteArray();
             current.append(std::move(record));
         } else if (q.lastError().isValid())
             return sqlError(q, error);
