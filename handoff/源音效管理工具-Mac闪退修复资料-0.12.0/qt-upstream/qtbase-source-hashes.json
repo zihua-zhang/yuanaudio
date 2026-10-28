@@ -1,0 +1,14 @@
+[
+  {
+    "path": "src/plugins/platforms/cocoa/qcocoaaccessibilityelement.h",
+    "sha256": "3ab7fe5168e8a50d988938fd34dd323e628d143cb89b803103b74bafdbd1dbae"
+  },
+  {
+    "path": "src/plugins/platforms/cocoa/qcocoaaccessibilityelement.mm",
+    "sha256": "1e1c3699f9de098a0c4979128ce8f43779976416ef3d41ca875073a2a4b26f27"
+  },
+  {
+    "path": "tests/auto/other/qaccessibilitymac/tst_qaccessibilitymac.mm",
+    "sha256": "8d98eb73662eee56cfdb83fd6b3966f8eeb6ae3dca4b629d5df32870e4760c78"
+  }
+]

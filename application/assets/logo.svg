@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="源音效管理工具标志">
+  <defs>
+    <linearGradient id="blue" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3984FA"/>
+      <stop offset="1" stop-color="#2347CA"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="256" height="256" rx="60" fill="url(#blue)"/>
+  <circle cx="76" cy="128" r="17" fill="#FFFFFF"/>
+  <path d="M112 88 C150 110 150 146 112 168" fill="none" stroke="#FFFFFF" stroke-width="18" stroke-linecap="round"/>
+  <path d="M143 62 C207 95 207 161 143 194" fill="none" stroke="#FFFFFF" stroke-width="18" stroke-linecap="round"/>
+</svg>

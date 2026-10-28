@@ -1,0 +1,37 @@
+name: macOS 27 Apple Silicon preview
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: xcode-27
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Prepare, build, test, and package macOS 27 arm64
+        run: bash scripts/prepare-macos.sh
+
+      - name: Verify disk image checksum
+        run: |
+          cd dist
+          shasum -a 256 -c 源音效管理工具-macOS27-Apple芯片-*.dmg.sha256
+
+      - name: Save Mac preview package
+        uses: actions/upload-artifact@v4
+        with:
+          name: YuanAudio-macOS27-arm64-${{ github.run_number }}
+          path: |
+            dist/源音效管理工具-macOS27-Apple芯片-*.dmg
+            dist/源音效管理工具-macOS27-Apple芯片-*.dmg.sha256
+            dist/macos-build.log
+          if-no-files-found: error
+          retention-days: 14

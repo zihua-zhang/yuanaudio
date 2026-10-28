@@ -1,0 +1,306 @@
+#include "workspace_panel.h"
+#include <QComboBox>
+#include <QCursor>
+#include <QDrag>
+#include <QHBoxLayout>
+#include <QInputDialog>
+#include <QLabel>
+#include <QLineEdit>
+#include <QMenu>
+#include <QMimeData>
+#include <QPushButton>
+#include <QScrollBar>
+#include <QSignalBlocker>
+#include <QVBoxLayout>
+
+void WorkspaceTrackList::setTrackRows(const QList<Track> &tracks) {
+    clear();
+    tracks_ = tracks;
+    setDragEnabled(true);
+    for (const auto &track : tracks_) {
+        auto *item = new QListWidgetItem(track.name + "\n" + track.folder, this);
+        item->setToolTip(track.name + "\n" + track.absolutePath() + "\n双击试听 · 拖出整首原文件");
+        item->setSizeHint(QSize(0, 40));
+    }
+}
+void WorkspaceTrackList::setFolderRows(const QList<PinnedFolder> &folders) {
+    clear();
+    tracks_.clear();
+    setDragEnabled(false);
+    for (const auto &folder : folders) {
+        auto *item = new QListWidgetItem(
+            folder.name + "\n" + (folder.path.isEmpty() ? QString("根目录") : folder.path), this);
+        item->setToolTip(folder.name + "\n" + folder.root + (folder.path.isEmpty() ? "" : "/" + folder.path) +
+                         "\n双击定位左侧目录树");
+        item->setSizeHint(QSize(0, 40));
+    }
+}
+QMimeData *WorkspaceTrackList::originalMimeData() const {
+    auto *mime = new QMimeData;
+    QList<Track> selected;
+    for (const auto *item : selectedItems()) {
+        const auto index = row(item);
+        if (index >= 0 && index < tracks_.size())
+            selected << tracks_[index];
+    }
+    if (!selected.isEmpty())
+        mime->setUrls(originalFileUrls(selected));
+    return mime;
+}
+void WorkspaceTrackList::startDrag(Qt::DropActions) {
+    auto *mime = originalMimeData();
+    if (!mime->hasUrls()) {
+        delete mime;
+        return;
+    }
+    auto *drag = new QDrag(this);
+    drag->setMimeData(mime);
+    drag->exec(Qt::CopyAction, Qt::CopyAction);
+    drag->deleteLater();
+}
+
+WorkspacePanel::WorkspacePanel(const QString &databasePath, QWidget *parent)
+    : QWidget(parent), store_(databasePath) {
+    setObjectName("workspacePanel");
+    setMinimumWidth(180);
+    auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(6);
+    mode_ = new QComboBox;
+    mode_->setObjectName("workspaceMode");
+    mode_->addItems({"候选清单", "最近试听", "常用目录"});
+    mode_->setAccessibleName("个人工作区视图");
+    layout->addWidget(mode_);
+    listTools_ = new QWidget;
+    auto *tools = new QHBoxLayout(listTools_);
+    tools->setContentsMargins(0, 0, 0, 0);
+    tools->setSpacing(4);
+    lists_ = new QComboBox;
+    lists_->setObjectName("candidateLists");
+    lists_->setMinimumWidth(0);
+    lists_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    lists_->setMinimumContentsLength(4);
+    lists_->setAccessibleName("当前候选清单");
+    tools->addWidget(lists_, 1);
+    auto *manage = new QPushButton("⋯");
+    manage->setObjectName("manageCandidateLists");
+    manage->setFixedWidth(32);
+    manage->setToolTip("新建、重命名或移除候选清单；不操作音乐原文件");
+    manage->setAccessibleName("管理候选清单");
+    tools->addWidget(manage);
+    layout->addWidget(listTools_);
+    rows_ = new WorkspaceTrackList;
+    rows_->setObjectName("workspaceRows");
+    rows_->setMinimumWidth(0);
+    rows_->setMinimumHeight(64);
+    rows_->setMaximumHeight(220);
+    rows_->setUniformItemSizes(true);
+    rows_->setTextElideMode(Qt::ElideMiddle);
+    rows_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    rows_->setSelectionMode(QAbstractItemView::SingleSelection);
+    rows_->setContextMenuPolicy(Qt::CustomContextMenu);
+    layout->addWidget(rows_);
+    notice_ = new QLabel;
+    notice_->setObjectName("workspaceNotice");
+    notice_->setTextFormat(Qt::PlainText);
+    notice_->setWordWrap(false);
+    layout->addWidget(notice_);
+    connect(mode_, &QComboBox::currentIndexChanged, this, &WorkspacePanel::refresh);
+    connect(lists_, &QComboBox::currentIndexChanged, this, &WorkspacePanel::refresh);
+    connect(manage, &QPushButton::clicked, this, &WorkspacePanel::editLists);
+    connect(rows_, &QListWidget::itemActivated, this,
+            [this](QListWidgetItem *item) { activateRow(rows_->row(item)); });
+    connect(rows_, &QWidget::customContextMenuRequested, this, &WorkspacePanel::contextMenu);
+    if (!store_.open()) {
+        notice_->setWordWrap(true);
+        notice_->setText("个人工作区暂不可用");
+        notice_->setToolTip(store_.lastError());
+        listTools_->setEnabled(false);
+        mode_->setEnabled(false);
+    } else {
+        refresh();
+    }
+}
+WorkspaceStore &WorkspacePanel::store() {
+    return store_;
+}
+bool WorkspacePanel::report(bool success) {
+    if (success)
+        return true;
+    notice_->setWordWrap(true);
+    notice_->setText("操作未完成，请重试");
+    notice_->setToolTip(store_.lastError());
+    emit warning(store_.lastError());
+    return false;
+}
+qint64 WorkspacePanel::currentCandidateList() const {
+    return lists_->currentData().toLongLong();
+}
+void WorkspacePanel::setCurrentCandidateList(qint64 listId) {
+    const int at = lists_->findData(listId);
+    if (at >= 0)
+        lists_->setCurrentIndex(at);
+}
+void WorkspacePanel::setMode(Mode mode) {
+    mode_->setCurrentIndex(mode);
+}
+bool WorkspacePanel::addCandidate(const Track &track) {
+    if (!report(store_.addCandidate(currentCandidateList(), track)))
+        return false;
+    refresh();
+    return true;
+}
+bool WorkspacePanel::recordAudition(const Track &track) {
+    if (!report(store_.recordAudition(track)))
+        return false;
+    if (mode_->currentIndex() == Recent)
+        refresh();
+    return true;
+}
+bool WorkspacePanel::pinFolder(const QString &libraryId, const QString &path, const QString &name,
+                               const QString &root) {
+    if (!report(store_.pinFolder({libraryId, path, name, root})))
+        return false;
+    if (mode_->currentIndex() == Folders)
+        refresh();
+    return true;
+}
+void WorkspacePanel::refresh() {
+    const auto listId = currentCandidateList();
+    const int scroll = rows_->verticalScrollBar()->value();
+    const auto previous = rows_->currentRow();
+    const auto previousTrack = previous >= 0 && previous < tracks_.size() ? tracks_[previous] : Track{};
+    const auto previousFolder =
+        previous >= 0 && previous < folders_.size() ? folders_[previous] : PinnedFolder{};
+    const auto lists = store_.candidateLists();
+    if (!store_.lastError().isEmpty()) {
+        report(false);
+        return;
+    }
+    {
+        QSignalBlocker block(lists_);
+        lists_->clear();
+        for (const auto &list : lists)
+            lists_->addItem(list.name, list.id);
+        const int prior = lists_->findData(listId);
+        if (prior >= 0)
+            lists_->setCurrentIndex(prior);
+    }
+    lists_->setToolTip(lists_->currentText());
+    const int mode = mode_->currentIndex();
+    listTools_->setVisible(mode == Candidates);
+    QList<Track> tracks;
+    QList<PinnedFolder> folders;
+    if (mode == Folders)
+        folders = store_.pinnedFolders();
+    else
+        tracks = mode == Recent ? store_.recents() : store_.candidates(currentCandidateList());
+    if (!store_.lastError().isEmpty()) {
+        report(false);
+        return;
+    }
+    tracks_ = tracks;
+    folders_ = folders;
+    QSignalBlocker block(rows_);
+    if (mode == Folders) {
+        rows_->setFolderRows(folders_);
+        for (int i = 0; i < folders_.size(); ++i)
+            if (folders_[i].libraryId == previousFolder.libraryId && folders_[i].path == previousFolder.path)
+                rows_->setCurrentRow(i);
+    } else {
+        rows_->setTrackRows(tracks_);
+        for (int i = 0; i < tracks_.size(); ++i)
+            if (tracks_[i].libraryId == previousTrack.libraryId &&
+                tracks_[i].relativePath == previousTrack.relativePath)
+                rows_->setCurrentRow(i);
+    }
+    rows_->verticalScrollBar()->setValue(scroll);
+    notice_->setWordWrap(false);
+    if (rows_->count()) {
+        notice_->setText(mode == Folders ? QString("%1 个目录 · 双击定位").arg(rows_->count())
+                                         : QString("%1 首 · 双击试听 / 拖出").arg(rows_->count()));
+        notice_->setToolTip(mode == Folders ? "双击定位左侧文件夹；移除只影响常用目录记录。"
+                                            : "双击试听；拖动整首原文件到剪辑软件，音乐原件保持原位。");
+    } else {
+        notice_->setText(mode == Folders  ? "右键文件夹加入常用目录"
+                         : mode == Recent ? "最近试听 · 最多 100 首"
+                                          : "右键加入候选 · 原件保持原位");
+        notice_->setToolTip(mode == Folders  ? "在左侧目录上右键，加入常用目录。"
+                            : mode == Recent ? "试听过的音乐会出现在这里，最多 100 首。"
+                                             : "在音乐上右键，加入当前候选清单。只保存引用，不复制音乐。");
+    }
+}
+void WorkspacePanel::activateRow(int row) {
+    if (mode_->currentIndex() == Folders) {
+        if (row >= 0 && row < folders_.size()) {
+            const auto folder = folders_[row];
+            emit folderActivated(folder.libraryId, folder.path);
+        }
+    } else if (row >= 0 && row < tracks_.size()) {
+        const auto track = tracks_[row];
+        emit trackActivated(track);
+    }
+}
+void WorkspacePanel::editLists() {
+    QMenu menu(this);
+    auto *create = menu.addAction("新建候选清单…");
+    auto *rename = menu.addAction("重命名当前清单…");
+    auto *remove = menu.addAction("移除当前清单（保留音乐原件）");
+    const auto chosen = menu.exec(QCursor::pos());
+    if (!chosen)
+        return;
+    if (chosen == remove) {
+        if (report(store_.removeList(currentCandidateList())))
+            refresh();
+        return;
+    }
+    if (chosen != create && chosen != rename)
+        return;
+    bool ok = false;
+    const auto name =
+        QInputDialog::getText(this, chosen == create ? "新建候选清单" : "重命名候选清单", "清单名称",
+                              QLineEdit::Normal, chosen == create ? QString() : lists_->currentText(), &ok);
+    if (!ok)
+        return;
+    if (chosen == create) {
+        const auto id = store_.createList(name);
+        if (report(id != 0)) {
+            refresh();
+            setCurrentCandidateList(id);
+        }
+    } else if (report(store_.renameList(currentCandidateList(), name))) {
+        refresh();
+    }
+}
+void WorkspacePanel::contextMenu(const QPoint &point) {
+    const auto *item = rows_->itemAt(point);
+    if (!item)
+        return;
+    const int row = rows_->row(item);
+    const int mode = mode_->currentIndex();
+    const auto listId = currentCandidateList();
+    const auto track = row < tracks_.size() ? tracks_[row] : Track{};
+    const auto folder = row < folders_.size() ? folders_[row] : PinnedFolder{};
+    QMenu menu(this);
+    auto *activate = menu.addAction(mode == Folders ? "定位文件夹" : "试听");
+    auto *remove = menu.addAction(mode == Folders  ? "从常用目录移除"
+                                  : mode == Recent ? "移除这条试听记录"
+                                                   : "从当前候选清单移除");
+    const auto chosen = menu.exec(rows_->viewport()->mapToGlobal(point));
+    if (chosen == activate) {
+        if (mode == Folders)
+            emit folderActivated(folder.libraryId, folder.path);
+        else
+            emit trackActivated(track);
+    } else if (chosen == remove) {
+        bool success = false;
+        if (mode == Folders) {
+            success = store_.unpinFolder(folder.libraryId, folder.path);
+        } else {
+            success = mode == Recent ? store_.removeRecent(track.libraryId, track.relativePath)
+                                     : store_.removeCandidate(listId, track.libraryId, track.relativePath);
+        }
+        if (report(success))
+            refresh();
+    }
+}

@@ -1,0 +1,116 @@
+{
+  "synthetic": {
+    "folders_including_roots": 40001,
+    "includes_connection_open": true,
+    "max_ms": 10.7777,
+    "p50_ms": 1.2075,
+    "p95_ms": 2.1273,
+    "prepare_ms": 3643,
+    "samples": 540,
+    "source": "synthetic",
+    "tracks": 100000
+  },
+  "local_index": {
+    "folders_including_roots": 1414,
+    "includes_connection_open": true,
+    "max_ms": 2.0766,
+    "p50_ms": 0.676,
+    "p95_ms": 1.0239,
+    "prepare_ms": 51,
+    "samples": 540,
+    "source": "local-index-snapshot",
+    "tracks": 59443
+  },
+  "short_playback_resource_sample": {
+    "logical_cpus": 12,
+    "samples": [
+      {
+        "elapsed_seconds": 1.0,
+        "processes": 2,
+        "cpu_seconds": 0.0938,
+        "cpu_percent": 0.781,
+        "working_mib": 114.67,
+        "private_mib": 93.85
+      },
+      {
+        "elapsed_seconds": 2.001,
+        "processes": 2,
+        "cpu_seconds": 0.125,
+        "cpu_percent": 1.041,
+        "working_mib": 114.42,
+        "private_mib": 93.86
+      },
+      {
+        "elapsed_seconds": 3.001,
+        "processes": 2,
+        "cpu_seconds": 0.0,
+        "cpu_percent": 0.0,
+        "working_mib": 113.86,
+        "private_mib": 93.54
+      },
+      {
+        "elapsed_seconds": 4.002,
+        "processes": 2,
+        "cpu_seconds": 0.0156,
+        "cpu_percent": 0.13,
+        "working_mib": 113.85,
+        "private_mib": 93.86
+      },
+      {
+        "elapsed_seconds": 5.002,
+        "processes": 2,
+        "cpu_seconds": 0.0312,
+        "cpu_percent": 0.26,
+        "working_mib": 113.32,
+        "private_mib": 93.46
+      },
+      {
+        "elapsed_seconds": 6.002,
+        "processes": 2,
+        "cpu_seconds": 0.0312,
+        "cpu_percent": 0.26,
+        "working_mib": 113.34,
+        "private_mib": 93.86
+      },
+      {
+        "elapsed_seconds": 7.003,
+        "processes": 2,
+        "cpu_seconds": 0.0781,
+        "cpu_percent": 0.651,
+        "working_mib": 113.36,
+        "private_mib": 93.86
+      },
+      {
+        "elapsed_seconds": 8.003,
+        "processes": 2,
+        "cpu_seconds": 0.0469,
+        "cpu_percent": 0.391,
+        "working_mib": 113.2,
+        "private_mib": 93.86
+      },
+      {
+        "elapsed_seconds": 9.003,
+        "processes": 2,
+        "cpu_seconds": 0.0469,
+        "cpu_percent": 0.39,
+        "working_mib": 112.95,
+        "private_mib": 93.86
+      },
+      {
+        "elapsed_seconds": 10.004,
+        "processes": 2,
+        "cpu_seconds": 0.0625,
+        "cpu_percent": 0.521,
+        "working_mib": 112.99,
+        "private_mib": 93.93
+      }
+    ],
+    "average_cpu_percent": 0.4425,
+    "max_cpu_percent": 1.041,
+    "average_working_mib": 113.596,
+    "max_working_mib": 114.67,
+    "method": "psutil CPU user+system deltas, normalized across logical CPUs; summed process working set",
+    "scope": "Windows 0.4 GUI and player, cached row waves ready, muted NAS MP3 playback; no scan or waveform generation",
+    "duration_seconds": 10.004
+  }
+}

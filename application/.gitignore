@@ -1,0 +1,12 @@
+.venv/
+.venv-macos/
+.tools/
+build/
+build-macos/
+dist/
+test-output/
+*.user
+__pycache__/
+aqtinstall.log
+test-output-*.txt
+test-output-*.json
