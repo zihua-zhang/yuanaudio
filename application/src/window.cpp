@@ -484,6 +484,7 @@ Window::Window(const QString &root, const QString &legacyDatabase, const QString
     connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged, this,
             [this] { if (appearanceModeValue_ == "system") applyAppearance(); });
     waveQueue_->configurePreparation(databasePath_, QDir(dataRoot_).filePath("wave-preparation.json"));
+    setupAutomaticSourceRepair();
     connect(waveQueue_, &WaveQueue::changed, this, &Window::updateWave);
     connect(waveQueue_, &WaveQueue::warning, this, [this](const Track &t, const QString &message) {
         if (WaveQueue::key(t) == WaveQueue::key(selected_))
@@ -495,7 +496,7 @@ Window::Window(const QString &root, const QString &legacyDatabase, const QString
     durationWriteRetry_.setSingleShot(true);
     connect(&durationWriteRetry_, &QTimer::timeout, this, &Window::flushDurationWrite);
     connect(table_, &TrackTable::viewportChanged, this, [this] { viewportDebounce_.start(); });
-    setWindowTitle("源音效管理工具 · 0.12.4");
+    setWindowTitle("源音效管理工具 · 0.12.5");
     resize(1320, 850);
     setMinimumSize(980, 640);
     debounce_.setSingleShot(true);
@@ -700,7 +701,7 @@ void Window::buildUi() {
     heading->setObjectName("brandTitle");
     heading->setFixedWidth(166);
     top->addWidget(heading);
-    heading->setToolTip("源音效管理工具 0.12.4 · 原文件工作流");
+    heading->setToolTip("源音效管理工具 0.12.5 · 原文件工作流");
     top->addSpacing(4);
     search_ = new QLineEdit;
     search_->setObjectName("musicSearch");
@@ -1955,6 +1956,20 @@ void Window::flushDurationWrite() {
 }
 void Window::sendPlayer(QJsonObject command) {
     const auto op = command["op"].toString();
+    if (op == "load") {
+        command["verificationCache"] = QDir(dataRoot_).filePath("media-verification.sqlite");
+        playerSourceRepairReload_ = false;
+    } else if (playerSourceRepairReload_ && selected_.id && (op == "play" || op == "cue")) {
+        playerSourceRepairReload_ = false;
+        ++selectionGeneration_;
+        sendPlayer({{"op", "load"}, {"path", selected_.sourcePath()},
+                    {"compatiblePath", selected_.compatiblePath},
+                    {"compatibleSha256", QString::fromLatin1(selected_.compatibleSha256)},
+                    {"compatibleSize", selected_.compatibleSize},
+                    {"compatibleModified", selected_.compatibleModified},
+                    {"generation", qint64(selectionGeneration_)}, {"autoplay", false},
+                    {"volume", volume_->value() / 100.0}});
+    }
     if (op == "load" || op == "cue" || op == "play") {
         playerLoading_ = true;
         playerResponse_.restart();
@@ -1975,6 +1990,7 @@ void Window::sendPlayer(QJsonObject command) {
                                  {"compatibleSha256", QString::fromLatin1(selected_.compatibleSha256)},
                                  {"compatibleSize", selected_.compatibleSize},
                                  {"compatibleModified", selected_.compatibleModified},
+                                 {"verificationCache", QDir(dataRoot_).filePath("media-verification.sqlite")},
                                  {"generation", qint64(selectionGeneration_)},
                                  {"autoplay", false},
                                  {"volume", volume_->value() / 100.0}};

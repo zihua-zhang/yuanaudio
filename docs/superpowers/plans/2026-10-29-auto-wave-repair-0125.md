@@ -24,24 +24,24 @@
 ### Task 1 Verification core
 Files: src/media_source.h/.cpp, optional new verification-store unit, tests/media_verification_tests.cpp.
 Interface: verifiedMediaPath(track,error,progress,verificationCachePath={}); cache hits report no positive read bytes.
-- [ ] RED first/repeated/cross-process, changed bytes/inode/timestamps/expectedSHA, corrupt/unwritable cache.
-- [ ] Implement reliable fingerprint and per-profile persisted receipt, fail-closed verification.
-- [ ] GREEN focused suite, report exact tests and paths. Root wires CMake/callers.
+- [x] RED first/repeated/cross-process, changed bytes/inode/timestamps/expectedSHA, corrupt/unwritable cache.
+- [x] Implement reliable fingerprint and per-profile persisted receipt, fail-closed verification.
+- [x] GREEN focused suite, report exact tests and paths. Root wires CMake/callers.
 
 ### Task 2 WaveQueue automatic integration
 Files: src/source_repair.h, wave_queue.h/.cpp, wave_parallel.cpp, tests/auto_source_repair_tests.cpp.
 Interface: SourceRepairReply {Track mapped; QString error; bool paused=false,needsConnection=false;}; SourceRepairCompletion=std::function<void(SourceRepairReply)>; SourceRepairHandler=std::function<void(const Track&,SourceRepairCompletion)>.
 WaveQueue setSourceRepairHandler(handler), resumeAfterSourceRepair(); sourceRepairNeedsConnection(Track,QString), sourceRepaired(Track). Root supplies handler.
-- [ ] RED source fail→handler→retry success without false failure, one repair per job, genuine failure advances, serial/4parallel, pause/late reply and auth pause/resume.
-- [ ] Intercept before outcome/cursor, keep job identity and one-attempt marker; refresh mapped snapshots; root handles child pause/auth forwarding.
-- [ ] Include verificationCache path in wave configs from configurePreparation, propagate to child helpers.
-- [ ] GREEN focused suite. Root owns CMake/worker changes.
+- [x] RED source fail→handler→retry success without false failure, one repair per job, genuine failure advances, serial/4parallel, pause/late reply and auth pause/resume.
+- [x] Intercept before outcome/cursor, keep job identity and one-attempt marker; refresh mapped snapshots; root handles child pause/auth forwarding.
+- [x] Include verificationCache path in wave configs from configurePreparation, propagate to child helpers.
+- [x] GREEN focused suite. Root owns CMake/worker changes.
 
 ### Task 3 Native coordinator and Window
 Files: new source_repair_coordinator unit, window_path_repair.cpp/window.h, workers.cpp/media_drag callers/CMake/version/settings.
-- [ ] RED runtime auth/no-secret persistence/session reuse, single NAS root, native repair and UI auth-once.
-- [ ] Background serial coordinator wraps nativeSMB backend and existing runPathRepair; coalesces same key; holds credentials in parent only.
-- [ ] Wire automatic handler, authorize-only dialog, resume unchanged batch/retry, mapped model/player refresh; pass verification cache to worker/player/drag.
+- [x] RED runtime auth/no-secret persistence/session reuse, single NAS root, native repair and UI auth-once.
+- [x] Background serial coordinator wraps nativeSMB backend and existing runPathRepair; coalesces same key; holds credentials in parent only.
+- [x] Wire automatic handler, authorize-only dialog, resume unchanged batch/retry, mapped model/player refresh; pass verification cache to worker/player/drag.
 - [ ] Bump0.12.5, preserve data/rollback; full suite and proper build.
 
 ### Task 4 Private backup, verification and full cache run

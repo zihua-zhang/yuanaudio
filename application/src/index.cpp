@@ -1,6 +1,6 @@
 #include "index.h"
 #include "file_publication.h"
-#include <QCryptographicHash>
+#include "media_source.h"
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -598,12 +598,17 @@ bool Index::setCompatibleSource(const Track &original, const QString &path, cons
     const auto copyPath = QDir::cleanPath(before.absoluteFilePath());
     const auto size = before.size();
     const auto modified = before.lastModified().toMSecsSinceEpoch();
-    QFile file(copyPath);
-    QCryptographicHash hash(QCryptographicHash::Sha256);
-    if (!file.open(QIODevice::ReadOnly) || !hash.addData(&file) ||
-        file.error() != QFileDevice::NoError || hash.result().toHex() != expected)
+    Track candidate = original;
+    candidate.compatiblePath = copyPath;
+    candidate.compatibleSize = size;
+    candidate.compatibleModified = modified;
+    candidate.compatibleSha256 = expected;
+    // Registration performs the trusted descriptor-based verification itself.
+    // Its receipt lets consumers reuse that pass without trusting the repair
+    // backend's supplied digest or changing the catalog's mapping transaction.
+    if (verifiedMediaPath(candidate, nullptr, {},
+                          QFileInfo(path_).dir().filePath("media-verification.sqlite")).isEmpty())
         return fail("兼容副本完整 SHA-256 校验失败，原有映射保持不变。");
-    file.close();
     const QFileInfo after(copyPath);
     if (!after.isFile() || after.isSymbolicLink() || after.size() != size ||
         after.lastModified().toMSecsSinceEpoch() != modified)

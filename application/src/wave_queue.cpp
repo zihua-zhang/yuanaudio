@@ -28,6 +28,7 @@ WaveQueue::WaveQueue(QString cache, QObject *parent) : QObject(parent), localCac
     connect(&failureFlush_, &QTimer::timeout, this, &WaveQueue::flushOutcomes);
 }
 WaveQueue::~WaveQueue() {
+    ++sourceRepairGeneration_;
     stopParallel(true);
     for (auto &slot : parallel_) {
         delete slot.worker;
@@ -149,6 +150,9 @@ void WaveQueue::refreshIndex(bool membershipChanged) {
     // A committed catalog update changes scheduling, not the validity of every cached view.
     // Versioned keys naturally separate changed files; unchanged views stay immediately usable.
     batchRunning_ = false;
+    sourceRepairPaused_ = sourceRepairResumeRunning_ = false;
+    resumeAllAfterRetry_ = allRetryChecked_ = allRetryCheckPending_ = false;
+    allPrefixReconcilePending_ = false;
     stopParallel(true);
     cancel();
     ++batchEpoch_;
@@ -175,6 +179,9 @@ void WaveQueue::refreshIndex(bool membershipChanged) {
         initializeFailures();
 }
 void WaveQueue::invalidate() {
+    sourceRepairPaused_ = sourceRepairResumeRunning_ = false;
+    resumeAllAfterRetry_ = allRetryChecked_ = allRetryCheckPending_ = false;
+    allPrefixReconcilePending_ = false;
     stopParallel(true);
     cancel();
     ++batchEpoch_;
@@ -193,6 +200,9 @@ void WaveQueue::invalidate() {
     // Keep the user's selected track prioritized; the next worker rechecks the real source fingerprint.
 }
 void WaveQueue::cancel() {
+    ++sourceRepairGeneration_;
+    const bool repairing = repairingSource_;
+    repairingSource_ = false;
     if (process_ && active_.id && !cancelled_) {
         cancelled_ = true;
         if (auto i = entries_.find(key(active_)); i != entries_.end() && preserveActiveView_) {
@@ -204,6 +214,14 @@ void WaveQueue::cancel() {
         else if (i != entries_.end() && i->complete && !i->stored)
             i->verificationDue = true;
         process_->kill(); // next job waits for finished; never destroy a running process here
+    }
+    if (repairing && active_.id) {
+        // The decoder is already idle while the parent repairs the source. There may
+        // be no process exit left to release this identity, so release it explicitly.
+        cancelled_ = true;
+        finishJob(false);
+        if (!process_)
+            cancelled_ = false;
     }
 }
 void WaveQueue::setVisible(const QList<Track> &tracks) {
@@ -223,6 +241,7 @@ void WaveQueue::setVisible(const QList<Track> &tracks) {
     schedule();
 }
 void WaveQueue::select(const Track &track, bool retry) {
+    suspendedSourceRepairKey_.clear();
     stopParallel(); // Audition gets the available I/O immediately.
     selected_ = track;
     const auto k = key(track);
@@ -271,6 +290,7 @@ void WaveQueue::trim() {
 void WaveQueue::configurePreparation(const QString &database, const QString &stateFile) {
     preparationDatabase_ = database;
     preparationFile_ = stateFile;
+    verificationCache_ = QFileInfo(stateFile).dir().filePath("media-verification.sqlite");
     QFile file(stateFile);
     if (file.open(QIODevice::ReadOnly) && file.size() < 2 * 1024 * 1024) {
         const auto state = QJsonDocument::fromJson(file.readAll()).object();
@@ -290,6 +310,9 @@ void WaveQueue::configurePreparation(const QString &database, const QString &sta
         preparationError_ = state["error"].toString();
         retryReferences_ = state["mode"].toString() == "reference";
         retryMode_ = retryReferences_ || state["mode"].toString() == "failed";
+        resumeAllAfterRetry_ = state["resumeAllAfterRetry"].toBool() && retryMode_ && !retryReferences_;
+        allRetryChecked_ = state["allRetryChecked"].toBool();
+        allPrefixReconcilePending_ = state["reconcilingCachedPrefix"].toBool() && !retryMode_;
         retryCursor_ = qMax(qint64(0), state["retryCursor"].toInteger());
         retryUpper_ = qMax(qint64(0), state["retryUpper"].toInteger());
         retryDone_ = qMax(qint64(0), state["retryDone"].toInteger());
@@ -319,8 +342,13 @@ QJsonObject WaveQueue::preparation() const {
             {"deferReason", deferReason_},
             {"backgroundPending", hasBackgroundWork()},
             {"waiting", waiting_},
+            {"repairingSource", repairingSource_},
+            {"sourceRepairPaused", sourceRepairPaused_},
             {"publishing", publishing_},
             {"mode", retryMode_ ? (retryReferences_ ? "reference" : "failed") : "all"},
+            {"resumeAllAfterRetry", resumeAllAfterRetry_},
+            {"allRetryChecked", allRetryChecked_},
+            {"reconcilingCachedPrefix", allPrefixReconciling_ || allPrefixReconcilePending_},
             {"retryCursor", retryCursor_},
             {"retryUpper", retryUpper_},
             {"retryDone", retryDone_},
@@ -362,7 +390,7 @@ QJsonObject WaveQueue::preparation() const {
                 continue;
             const auto progress = slot.worker->preparation();
             for (const auto *field : {"current", "currentPath", "readBytes", "decodedMs", "estimatedMs",
-                                      "elapsedMs", "idleMs", "waiting", "publishing"})
+                                      "elapsedMs", "idleMs", "waiting", "publishing", "repairingSource"})
                 result[field] = progress[field];
             result["canSkip"] = batchRunning_;
             result["foreground"] = false;
@@ -381,16 +409,27 @@ void WaveQueue::savePreparation() {
 void WaveQueue::prepareAll(qint64 rate, bool restart) {
     if (preparationDatabase_.isEmpty())
         return;
+    suspendedSourceRepairKey_.clear();
+    sourceRepairPaused_ = sourceRepairResumeRunning_ = false;
+    if (resumeAllAfterRetry_ && retryMode_ && !restart) {
+        batchRate_ = preparationRate(rate);
+        batchRunning_ = true;
+        preparationError_.clear();
+        savePreparation();
+        schedule();
+        return;
+    }
     if (retryMode_) {
         stopParallel(true);
         cancel();
         retryMode_ = false;
         retryPage_.clear();
         ++batchEpoch_;
+        resumeAllAfterRetry_ = allRetryChecked_ = false;
     }
     if (batchComplete_ || restart || catalogNeedsReview_) {
         stopParallel(true);
-        if (batchActive_)
+        if (batchActive_ || repairingSource_)
             cancel();
         ++batchEpoch_;
         batchCursor_ = batchDone_ = batchFailed_ = batchTotal_ = 0;
@@ -399,6 +438,8 @@ void WaveQueue::prepareAll(qint64 rate, bool restart) {
         batchPage_.clear();
         batchComplete_ = false;
         catalogNeedsReview_ = false;
+        allRetryChecked_ = false;
+        allPrefixReconcilePending_ = false;
     }
     const auto newRate = preparationRate(rate);
     if (newRate != batchRate_)
@@ -408,15 +449,25 @@ void WaveQueue::prepareAll(qint64 rate, bool restart) {
     if (backgroundJobRate() != activeRate_ && active_.id && background_)
         cancel();
     preparationError_.clear();
+    allRetryCheckPending_ = bool(sourceRepairHandler_) && !allRetryChecked_;
     savePreparation();
+    if (allPrefixReconcilePending_) {
+        continueAllAfterRetry();
+        return;
+    }
+    if (maybeAutoRetryAll())
+        return;
     if (batchPage_.isEmpty())
         fetchBatch(); // Publish the total even while visible tracks have decoding priority.
     schedule();
 }
 void WaveQueue::pausePreparation() {
+    if (repairingSource_)
+        suspendedSourceRepairKey_ = key(active_);
+    sourceRepairPaused_ = sourceRepairResumeRunning_ = false;
     batchRunning_ = false;
     stopParallel();
-    if (batchActive_ || retryActive_ ||
+    if (repairingSource_ || batchActive_ || retryActive_ ||
         (active_.id && background_ && (activeRate_ == 0 || activeRate_ > 1048576)))
         cancel();
     savePreparation();
@@ -435,8 +486,11 @@ void WaveQueue::initializeFailures() {
             failuresReady_ = true;
             if (retryMode_ && batchRunning_)
                 fetchRetries(retryUpper_ == 0);
+            else if (allRetryCheckPending_)
+                maybeAutoRetryAll();
         }
         emit preparationChanged();
+        schedule();
     });
     watcher->setFuture(QtConcurrent::run(&failurePool_, [path = failureFile_, database = preparationDatabase_,
                                                          recent = recentFailures_, failed = batchFailed_] {
@@ -564,10 +618,87 @@ void WaveQueue::retryFailed(qint64 rate) {
 void WaveQueue::retryReferences(qint64 rate) {
     startRetry(true, rate);
 }
+bool WaveQueue::maybeAutoRetryAll() {
+    if (!allRetryCheckPending_ || !batchRunning_ || retryMode_)
+        return false;
+    if (!failuresReady_)
+        return true;
+    allRetryCheckPending_ = false;
+    allRetryChecked_ = true;
+    if (failureSummary_["knownFailures"].toInteger() <= 0)
+        return false;
+    // A bounded ledger snapshot is retried once before returning to the unchanged
+    // all-mode cursor. In particular, old failures before that cursor remain reachable.
+    startRetry(false, batchRate_);
+    resumeAllAfterRetry_ = true;
+    savePreparation();
+    return true;
+}
+void WaveQueue::continueAllAfterRetry() {
+    allPrefixReconcilePending_ = false;
+    resumeAllAfterRetry_ = false;
+    retryMode_ = false;
+    retryPage_.clear();
+    batchRunning_ = true;
+    allPrefixReconciling_ = true;
+    const auto generation = batchEpoch_;
+    const auto cursor = batchCursor_;
+    struct Prefix {
+        qint64 done = 0, references = 0;
+        QString error;
+    };
+    auto *watcher = new QFutureWatcher<Prefix>(this);
+    connect(watcher, &QFutureWatcher<Prefix>::finished, this, [this, watcher, generation, cursor] {
+        const auto prefix = watcher->result();
+        watcher->deleteLater();
+        allPrefixReconciling_ = false;
+        if (generation == batchEpoch_ && cursor == batchCursor_ && !retryMode_) {
+            if (prefix.error.isEmpty()) {
+                batchDone_ = prefix.done;
+                batchReference_ = prefix.references;
+            } else {
+                batchRunning_ = false;
+                preparationError_ = "本机缓存进度未能核对：" + prefix.error;
+            }
+            savePreparation();
+        }
+        schedule();
+    });
+    watcher->setFuture(QtConcurrent::run(
+        &localPool_, [database = preparationDatabase_, cache = localCache_, cursor] {
+            Prefix prefix;
+            Index index(database);
+            if (!index.open(&prefix.error))
+                return prefix;
+            qint64 after = 0;
+            while (after < cursor) {
+                const auto page = index.tracksAfter(after, 200);
+                prefix.error = index.lastError();
+                if (!prefix.error.isEmpty() || page.isEmpty())
+                    break;
+                for (const auto &track : page) {
+                    if (track.id > cursor)
+                        return prefix;
+                    after = track.id;
+                    WaveData wave;
+                    bool reference = false;
+                    if (loadWaveView(cache, key(track), &wave, nullptr, &reference)) {
+                        ++prefix.done;
+                        prefix.references += reference;
+                    }
+                }
+            }
+            return prefix;
+        }));
+}
 void WaveQueue::startRetry(bool references, qint64 rate) {
+    suspendedSourceRepairKey_.clear();
+    resumeAllAfterRetry_ = allRetryCheckPending_ = false;
+    allPrefixReconcilePending_ = false;
+    sourceRepairPaused_ = sourceRepairResumeRunning_ = false;
     stopParallel(true);
     const bool resume = retryMode_ && retryReferences_ == references && !retryComplete_ && retryUpper_ > 0;
-    if (batchActive_ || retryActive_)
+    if (repairingSource_ || batchActive_ || retryActive_)
         cancel();
     ++batchEpoch_;
     batchPage_.clear();
@@ -626,6 +757,8 @@ void WaveQueue::fetchRetries(bool start) {
             if (retryPage_.isEmpty()) {
                 batchRunning_ = false;
                 retryComplete_ = true;
+                if (resumeAllAfterRetry_)
+                    continueAllAfterRetry();
             }
         }
         savePreparation();
@@ -846,8 +979,115 @@ void WaveQueue::advanceBatch(const Track &track, bool success, bool reference) {
     }
     savePreparation();
 }
+void WaveQueue::setSourceRepairHandler(SourceRepairHandler handler) {
+    sourceRepairHandler_ = std::move(handler);
+    for (auto &slot : parallel_)
+        if (slot.worker)
+            slot.worker->setSourceRepairHandler(sourceRepairHandler_);
+}
+void WaveQueue::refreshMappedTrack(const Track &mapped) {
+    const auto mappedKey = key(mapped);
+    auto update = [&](Track &track) {
+        if (track.id == mapped.id && key(track) == mappedKey)
+            track = mapped;
+    };
+    update(selected_);
+    update(active_);
+    for (auto &track : visible_)
+        update(track);
+    for (auto &item : batchPage_)
+        update(item.first);
+    for (auto &record : retryPage_)
+        update(record.track);
+    for (auto &slot : parallel_) {
+        update(slot.track);
+        if (slot.worker)
+            slot.worker->refreshMappedTrack(mapped);
+    }
+}
+void WaveQueue::pauseForSourceRepair(const Track &track, const SourceRepairReply &reply) {
+    if (sourceRepairPaused_)
+        return;
+    sourceRepairResumeRunning_ = batchRunning_;
+    sourceRepairPaused_ = true;
+    batchRunning_ = false;
+    preparationError_ = reply.error;
+    stopParallel();
+    if (active_.id)
+        cancel();
+    savePreparation();
+    if (reply.needsConnection)
+        emit sourceRepairNeedsConnection(track, reply.error);
+}
+void WaveQueue::resumeAfterSourceRepair() {
+    if (!sourceRepairPaused_)
+        return;
+    suspendedSourceRepairKey_.clear();
+    sourceRepairPaused_ = false;
+    batchRunning_ = sourceRepairResumeRunning_;
+    sourceRepairResumeRunning_ = false;
+    preparationError_.clear();
+    savePreparation();
+    schedule();
+}
+bool WaveQueue::trySourceRepair() {
+    const auto track = active_;
+    const auto k = key(track);
+    const auto kind = entries_.value(k).failureKind;
+    if (!sourceRepairHandler_ || sourceRepairAttempted_ ||
+        (!batchRunning_ && !parallelWorker_) ||
+        (kind != "source_unavailable" && kind != "compatible_unavailable"))
+        return false;
+    sourceRepairAttempted_ = true;
+    repairingSource_ = true;
+    workerWatchdog_.stop();
+    waiting_ = false;
+    auto &entry = entries_[k];
+    entry.failed = false;
+    entry.message = "正在自动修复音频访问路径…";
+    const auto generation = sourceRepairGeneration_;
+    const QPointer<WaveQueue> guard(this);
+    const auto handler = sourceRepairHandler_;
+    emit changed(track);
+    emit preparationChanged();
+    if (!guard || generation != sourceRepairGeneration_ || !repairingSource_)
+        return true;
+    handler(track, [guard, track, k, kind, generation](SourceRepairReply reply) {
+        if (!guard || guard->sourceRepairGeneration_ != generation || !guard->repairingSource_ ||
+            guard->cancelled_ || !guard->active_.id || key(guard->active_) != k)
+            return;
+        auto *queue = guard.data();
+        auto *owner = queue->sourceRepairOwner_ ? queue->sourceRepairOwner_.data() : queue;
+        if (reply.paused || reply.needsConnection) {
+            owner->pauseForSourceRepair(track, reply);
+            return;
+        }
+        queue->repairingSource_ = false;
+        auto &current = queue->entries_[k];
+        if (reply.mapped.id == track.id && reply.mapped.id > 0 && key(reply.mapped) == k) {
+            owner->refreshMappedTrack(reply.mapped);
+            current.failed = false;
+            current.failureKind.clear();
+            current.message = "路径已修复 · 正在重新准备波形…";
+            queue->readBytes_ = queue->decodedMs_ = 0;
+            emit owner->sourceRepaired(reply.mapped);
+            if (guard && guard->sourceRepairGeneration_ == generation && !guard->cancelled_ &&
+                key(guard->active_) == k)
+                guard->submitActiveJob();
+        } else {
+            current.failed = true;
+            current.failureKind = kind;
+            current.message = reply.error.isEmpty() ? QString("自动修复未完成，原件仍不可访问") : reply.error;
+            emit queue->changed(track);
+            queue->finishJob(false);
+        }
+    });
+    return true;
+}
 void WaveQueue::finishJob(bool success) {
     if (!active_.id)
+        return;
+    if (!cancelled_ && (repairingSource_ || (!success && trySourceRepair())))
         return;
     const auto track = active_;
     const auto k = key(track);
@@ -890,6 +1130,7 @@ void WaveQueue::finishJob(bool success) {
     waiting_ = false;
     publishing_ = false;
     preserveActiveView_ = false;
+    sourceRepairAttempted_ = false;
     workerWatchdog_.stop();
     if (report)
         emit jobFinished(track, outcomeSuccess);
@@ -988,8 +1229,8 @@ void WaveQueue::startProcess() {
             return;
         // Cached pixels are not a completion receipt for a new verification/publication job.
         // Persistent workers must acknowledge each job before exiting.
-        finishJob(false);
         process_ = nullptr;
+        finishJob(false);
         cancelled_ = false;
         p->deleteLater();
         emit preparationChanged(); // A parent pool may be waiting to reuse a cancelled slot.
@@ -1024,6 +1265,8 @@ void WaveQueue::startProcess() {
     p->start(workerProgram_, {"--worker", "waves"});
 }
 void WaveQueue::schedule() {
+    if (sourceRepairPaused_ || allPrefixReconciling_ || maybeAutoRetryAll())
+        return;
     if (!parallelWorker_ && (!batchRunning_ || !deferReason_.isEmpty()))
         stopParallel();
     if (!parallelWorker_ && batchRunning_ && !retryMode_ && !failureWriting_)
@@ -1049,6 +1292,9 @@ void WaveQueue::schedule() {
         return;
     }
     Track next;
+    const auto sourceSuspended = [this](const Track &track) {
+        return !batchRunning_ && !suspendedSourceRepairKey_.isEmpty() && key(track) == suspendedSourceRepairKey_;
+    };
     bool publishExisting = false;
     auto sharedConfigured = [this](const Track &track) {
         for (const auto &library : libraries_)
@@ -1056,21 +1302,21 @@ void WaveQueue::schedule() {
                 return !library.sharedCache.isEmpty();
         return false;
     };
-    if (selected_.id && !entries_.contains(key(selected_)) && localChecked_.contains(key(selected_)))
+    if (selected_.id && !sourceSuspended(selected_) && !entries_.contains(key(selected_)) && localChecked_.contains(key(selected_)))
         next = selected_;
-    else if (selected_.id && entries_.contains(key(selected_)) && entries_[key(selected_)].verificationDue &&
+    else if (selected_.id && !sourceSuspended(selected_) && entries_.contains(key(selected_)) && entries_[key(selected_)].verificationDue &&
              !entries_[key(selected_)].failed)
         next = selected_;
     else if (allowBackground)
         for (const auto &t : visible_)
-            if (!parallelOwns(t) && !entries_.contains(key(t)) && localChecked_.contains(key(t))) {
+            if (!sourceSuspended(t) && !parallelOwns(t) && !entries_.contains(key(t)) && localChecked_.contains(key(t))) {
                 next = t;
                 break;
             }
     if (!next.id && allowBackground) {
         for (const auto &t : visible_) {
             const auto it = entries_.constFind(key(t));
-            if (!parallelOwns(t) && it != entries_.cend() && it->verificationDue && !it->failed) {
+            if (!sourceSuspended(t) && !parallelOwns(t) && it != entries_.cend() && it->verificationDue && !it->failed) {
                 next = t;
                 break;
             }
@@ -1149,6 +1395,8 @@ void WaveQueue::schedule() {
     if (parallelWorker_)
         publishExisting = parallelPublish_;
     active_ = next;
+    sourceRepairAttempted_ = false;
+    ++sourceRepairGeneration_;
     readBytes_ = decodedMs_ = 0;
     publishing_ = publishExisting;
     background_ = parallelWorker_ || publishExisting || (retryActive_ && retryReferences_) ||
@@ -1168,6 +1416,13 @@ void WaveQueue::schedule() {
     entries_[k] = entry;
     cancelled_ = false;
     waiting_ = false;
+    submitActiveJob();
+    scheduleParallel();
+}
+void WaveQueue::submitActiveJob() {
+    if (!active_.id || cancelled_ || repairingSource_)
+        return;
+    const auto next = active_;
     QString shared, sharedLibrary;
     for (const auto &l : libraries_)
         if (l.id == next.libraryId) {
@@ -1180,12 +1435,13 @@ void WaveQueue::schedule() {
         {"compatibleSha256", QString::fromLatin1(next.compatibleSha256)},
         {"compatibleSize", next.compatibleSize},
         {"compatibleModified", next.compatibleModified},
+        {"verificationCache", verificationCache_},
         {"relative", next.relativePath},
         {"library", next.libraryId},
         {"local", localCache_},
         {"shared", shared},
         {"sharedLibrary", sharedLibrary},
-        {"operation", publishExisting ? QString("publish_existing") : QString("wave")},
+        {"operation", publishing_ ? QString("publish_existing") : QString("wave")},
         {"indexedSize", next.size},
         {"indexedModified", next.modified},
         {"background", background_},
@@ -1202,5 +1458,4 @@ void WaveQueue::schedule() {
     workerWatchdog_.start(500);
     emit changed(next);
     emit preparationChanged();
-    scheduleParallel();
 }

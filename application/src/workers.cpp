@@ -275,7 +275,7 @@ static int buildWave(const QJsonObject &config) {
     // The copy's mtime is independent of the indexed original version.
     if (compatible && (path.isEmpty() || !config.contains("indexedSize") ||
                        !config.contains("indexedModified") ||
-                       verifiedMediaPath(media, &mediaError, verificationProgress).isEmpty()))
+                       verifiedMediaPath(media, &mediaError, verificationProgress, config["verificationCache"].toString()).isEmpty()))
         return failure(mediaError.isEmpty() ? QString("兼容文件缺少原曲索引版本，无法核验。") : mediaError,
                        "compatible_unavailable");
     // Compatible views must not be published under the identity of an original on
@@ -348,7 +348,7 @@ static int buildWave(const QJsonObject &config) {
     QJsonObject diagnostics;
     auto sourceStable = [&] {
         if (compatible)
-            return !verifiedMediaPath(media, nullptr, verificationProgress).isEmpty();
+            return !verifiedMediaPath(media, nullptr, verificationProgress, config["verificationCache"].toString()).isEmpty();
         const QFileInfo current(path);
         return current.isFile() && current.size() == size &&
                current.lastModified().toMSecsSinceEpoch() == stamp && fingerprint(path) == signature;
@@ -550,7 +550,7 @@ static int runPlayer(QCoreApplication &app) {
                     output({{"event", "verifying"}, {"generation", current}, {"bytes", bytes}});
                 };
                 if (m["path"].toString().isEmpty() ||
-                    verifiedMediaPath(compatibleTrack(m), &error, verificationProgress).isEmpty()) {
+                    verifiedMediaPath(compatibleTrack(m), &error, verificationProgress, m["verificationCache"].toString()).isEmpty()) {
                     mediaFailed = true;
                     output({{"event", "error"}, {"generation", generation},
                             {"kind", "compatible_unavailable"},

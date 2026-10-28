@@ -2,12 +2,14 @@
 #include "cache.h"
 #include "failure_store.h"
 #include "index.h"
+#include "source_repair.h"
 #include <QElapsedTimer>
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QObject>
 #include <QProcess>
+#include <QPointer>
 #include <QSet>
 #include <QThreadPool>
 #include <QTimer>
@@ -43,6 +45,8 @@ class WaveQueue : public QObject {
     const RowWave *find(const Track &track) const;
     static QString key(const Track &track);
     void configurePreparation(const QString &database, const QString &stateFile);
+    void setSourceRepairHandler(SourceRepairHandler handler);
+    void resumeAfterSourceRepair();
     void prepareAll(qint64 bytesPerSecond = 10 * 1048576, bool restart = false);
     void pausePreparation();
     void setPreparationConcurrency(int count);
@@ -62,9 +66,27 @@ class WaveQueue : public QObject {
     void preparationChanged();
     void failurePageReady(const QJsonObject &page);
     void jobFinished(const Track &track, bool success);
+    void sourceRepairNeedsConnection(const Track &track, const QString &message);
+    void sourceRepaired(const Track &track);
 
   private:
     QString localCache_;
+    QString verificationCache_;
+    QString suspendedSourceRepairKey_;
+    SourceRepairHandler sourceRepairHandler_;
+    QPointer<WaveQueue> sourceRepairOwner_;
+    quint64 sourceRepairGeneration_ = 0;
+    bool sourceRepairAttempted_ = false, repairingSource_ = false;
+    bool sourceRepairPaused_ = false, sourceRepairResumeRunning_ = false;
+    bool resumeAllAfterRetry_ = false, allRetryChecked_ = false;
+    bool allRetryCheckPending_ = false, allPrefixReconciling_ = false;
+    bool allPrefixReconcilePending_ = false;
+    bool maybeAutoRetryAll();
+    void continueAllAfterRetry();
+    bool trySourceRepair();
+    void pauseForSourceRepair(const Track &track, const SourceRepairReply &reply);
+    void refreshMappedTrack(const Track &mapped);
+    void submitActiveJob();
     QList<Library> libraries_;
     QList<Track> visible_;
     Track selected_, active_;

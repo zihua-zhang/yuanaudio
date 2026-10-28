@@ -90,7 +90,7 @@ void Window::buildSettings() {
     for (int row = 0; row < settingsNavigation_->count(); ++row)
         settingsNavigation_->item(row)->setSizeHint(QSize(140, 42));
     side->addWidget(settingsNavigation_, 1);
-    side->addWidget(textLabel("源音效管理工具\n0.12.4", "settingDetail"));
+    side->addWidget(textLabel("源音效管理工具\n0.12.5", "settingDetail"));
     body->addWidget(sidebar);
     settingsPages_ = new QStackedWidget;
     settingsPages_->setObjectName("settingsPages");
@@ -466,9 +466,10 @@ void Window::buildSettings() {
                 const bool running = state["running"].toBool(), complete = state["complete"].toBool();
                 const bool review = state["catalogNeedsReview"].toBool();
                 const auto done = state["done"].toInteger(), failed = state["failed"].toInteger();
+                const auto knownFailures = state["knownFailures"].toInteger();
                 const bool retry = state["mode"] != "all", referenceMode = state["mode"] == "reference";
                 const auto total = state[retry ? "retryTotal" : "total"].toInteger();
-                const auto processed = retry ? state["retryDone"].toInteger() : done + failed;
+                const auto processed = retry ? state["retryDone"].toInteger() : done;
                 const int percent = total > 0 ? int(qMin(qint64(100), processed * 100 / total)) : 0;
                 prepare->setEnabled(!running && indexReady_);
                 prepare->setText(review                        ? "检查更新后的素材库"
@@ -485,7 +486,10 @@ void Window::buildSettings() {
                                         ? "继续分析参考波形"
                                         : "重新分析参考波形");
                 preparationSpeed_->setEnabled(true);
-                const auto stage = state["deferred"].toBool() ? QString("自动让路")
+                const auto stage = state["sourceRepairPaused"].toBool() ? QString("路径处理暂停")
+                                   : state["repairingSource"].toBool() ? QString("自动处理路径")
+                                   : state["reconcilingCachedPrefix"].toBool() ? QString("核对已有缓存")
+                                   : state["deferred"].toBool() ? QString("自动让路")
                                    : review                   ? QString("上次准备")
                                    : running                  ? QString("准备中")
                                    : (retry ? state["retryComplete"].toBool() : complete)
@@ -497,26 +501,36 @@ void Window::buildSettings() {
                                               .arg(total)
                                               .arg(state["knownReferences"].toInteger())
                                               .arg(state["knownFailures"].toInteger())
-                                        : QString("%1 · 已缓存 %2 / %3\n参考波形 %4 · 失败 %5")
+                                        : QString("%1 · 已缓存 %2 / %3\n参考波形 %4 · 当前待处理异常 %5 · 批次累计失败 %6")
                                               .arg(stage)
                                               .arg(done)
                                               .arg(total)
                                               .arg(state["reference"].toInteger())
+                                              .arg(knownFailures)
                                               .arg(failed));
                 bar->setValue(percent);
                 const auto error = state["error"].toString();
-                cacheStatusButton_->setText(state["deferred"].toBool()             ? "后台已让路"
+                cacheStatusButton_->setText(state["sourceRepairPaused"].toBool() ? "路径处理已暂停"
+                                            : state["repairingSource"].toBool() ? "正在处理路径"
+                                            : state["reconcilingCachedPrefix"].toBool() ? "正在核对缓存"
+                                            : state["deferred"].toBool()             ? "后台已让路"
                                             : running && referenceMode             ? "正在分析参考波形"
                                             : running && state["mode"] == "failed" ? "正在重试波形"
                                             : running          ? QString("缓存中 %1%").arg(percent)
                                             : !error.isEmpty() ? "缓存需处理"
                                             : review           ? "缓存待检查"
-                                            : failed           ? QString("缓存异常 %1").arg(failed)
+                                            : knownFailures    ? QString("缓存异常 %1").arg(knownFailures)
                                                                : "波形缓存");
                 cacheStatusButton_->setToolTip(progress->text() + (error.isEmpty() ? "" : "\n" + error) +
                                                "\n点击打开波形缓存设置");
                 QString detail;
-                if (state["deferred"].toBool())
+                if (state["sourceRepairPaused"].toBool())
+                    detail = "当前任务与已有波形已保留，处理连接或缓存问题后可继续。";
+                else if (state["repairingSource"].toBool())
+                    detail = "正在自动处理当前文件的访问路径，完成后继续准备这首波形。";
+                else if (state["reconcilingCachedPrefix"].toBool())
+                    detail = "正在核对已有缓存，随后继续全库准备。";
+                else if (state["deferred"].toBool())
                     detail = "已保留进度 · " + state["deferReason"].toString();
                 else if (referenceMode)
                     detail = QString("本轮已转准确 %1 · 仍为参考 %2 · 分析或同步异常 %3\n%4")
@@ -526,7 +540,8 @@ void Window::buildSettings() {
                                  .arg(running ? state["current"].toString()
                                               : "进度已保留；异常不覆盖原有波形，音乐文件保持原样。");
                 else if (state["mode"] == "failed")
-                    detail = QString("只重试失败 · 已处理 %1 / %2 · 本次仍失败 %3")
+                    detail = QString("%1 · 已处理 %2 / %3 · 本次仍失败 %4")
+                                 .arg(state["resumeAllAfterRetry"].toBool() ? "先重试已有异常，随后继续全库" : "只重试失败")
                                  .arg(state["retryDone"].toInteger())
                                  .arg(state["retryTotal"].toInteger())
                                  .arg(state["retryFailed"].toInteger());

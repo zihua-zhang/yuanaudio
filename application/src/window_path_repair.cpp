@@ -1,6 +1,7 @@
 #include "window.h"
 #include "path_repair.h"
 #include "smb_client.h"
+#include "source_repair_coordinator.h"
 #include <QApplication>
 #include <QDir>
 #include <QFile>
@@ -53,22 +54,89 @@ public:
     }
 };
 QString pathSettings(const QString &root) { return QDir(root).filePath("path-repair-v2-settings.json"); }
+struct RepairRun {
+    PathRepairResult result;
+    SourceRepairSession session;
+    bool authenticated = false;
+};
+SourceRepairSession savedRepairHints(const QString &profile, const QString &catalog) {
+    SourceRepairSession session;
+    session.options.indexPath = catalog;
+    session.options.preferHardLinks = true;
+    session.options.localCacheRoot = QDir(profile).filePath("audio-compat-cache");
+    QFile file(pathSettings(profile));
+    if (file.open(QIODevice::ReadOnly) && file.size() < 1024 * 1024) {
+        const auto settings = QJsonDocument::fromJson(file.readAll()).object();
+        session.host = settings["endpoint"].toString();
+        session.share = settings["remote"].toString();
+        session.options.mountRoot = settings["mount"].toString();
+        session.options.outputRoot = settings["output"].toString();
+        if (!settings["local"].toString().isEmpty())
+            session.options.localCacheRoot = settings["local"].toString();
+    }
+    session.options.serverRoot = "/" + session.share;
+    return session;
+}
 } // namespace
 
-void Window::showNasPathRepair() {
+void Window::setupAutomaticSourceRepair() {
+    sourceRepairCoordinator_ = new SourceRepairCoordinator(dataRoot_, databasePath_, this);
+    sourceRepairCoordinator_->configure(savedRepairHints(dataRoot_, databasePath_));
+    sourceRepairCoordinator_->setPaused(!waveQueue_->preparation()["running"].toBool());
+    connect(waveQueue_, &WaveQueue::preparationChanged, this, [this] {
+        sourceRepairCoordinator_->setPaused(!waveQueue_->preparation()["running"].toBool());
+    });
+    waveQueue_->setSourceRepairHandler([this](const Track &track, SourceRepairCompletion completion) {
+        sourceRepairCoordinator_->setLibraries(libraries_);
+        sourceRepairCoordinator_->setPaused(!waveQueue_->preparation()["running"].toBool());
+        sourceRepairCoordinator_->repair(track, std::move(completion));
+    });
+    connect(waveQueue_, &WaveQueue::sourceRepairNeedsConnection, this,
+            [this](const Track &track, const QString &message) {
+        automaticSourceRepairLibrary_ = track.libraryId;
+        setStatus(message);
+        showNasPathRepair(true);
+    });
+    connect(waveQueue_, &WaveQueue::sourceRepaired, this, [this](const Track &mapped) {
+        const auto row = model_->rowForTrack(mapped);
+        if (row >= 0) {
+            model_->tracks[row] = mapped;
+            emit model_->dataChanged(model_->index(row, 0), model_->index(row, TrackModel::ColumnCount - 1));
+        }
+        if (mapped.id == selected_.id && WaveQueue::key(mapped) == WaveQueue::key(selected_)) {
+            selected_ = mapped;
+            // Loading the player immediately would preempt the retained wave job.
+            // The next explicit play/cue loads this refreshed path first.
+            playerSourceRepairReload_ = true;
+            detail_->setText("兼容文件 · " + mapped.sourcePath());
+            detail_->setToolTip("原件：" + mapped.absolutePath() + "\n兼容文件：" + mapped.sourcePath());
+            updateWave(mapped);
+        }
+        workspace_->refresh(); // Local catalog only; no scan or queue invalidation.
+    });
+}
+
+void Window::showNasPathRepair(bool authorizeOnly) {
     if (auto *existing = findChild<QDialog *>("nasPathRepairDialog")) {
-        existing->show(); existing->raise(); existing->activateWindow(); return;
+        if (!authorizeOnly || existing->property("authorizeOnly").toBool() ||
+            static_cast<RepairDialog *>(existing)->running) {
+            existing->show(); existing->raise(); existing->activateWindow(); return;
+        }
+        delete existing;
     }
     auto *dialog = new RepairDialog(this);
     dialog->setObjectName("nasPathRepairDialog");
+    dialog->setProperty("authorizeOnly", authorizeOnly);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
-    dialog->setWindowTitle("批量处理路径问题");
+    dialog->setWindowTitle(authorizeOnly ? "连接 NAS，继续全库波形准备" : "批量处理路径问题");
     dialog->resize(800, 750);
     auto *layout = new QVBoxLayout(dialog);
     auto *intro = new QLabel("处理 NAS 特殊字符路径：优先建立兼容硬链接，不支持或无法访问的单项缓存到本机。\n"
                             "原文件名不变，不写入音频内容。硬链接与原件共享内容，软件仅只读使用；不额外复制音频。\n"
                             "保留收藏、标签和已有波形。仅处理路径异常；账号密码只用于本次 SMB 连接。");
     intro->setWordWrap(true); layout->addWidget(intro);
+    if (authorizeOnly)
+        intro->setText("当前波形任务已暂停。连接 NAS 后，会继续原来的全库准备或异常重试，遇到路径问题时优先建立兼容硬链接，必要时缓存到本机。\n账号密码只保留在本次软件运行期间。");
     auto *form = new QFormLayout;
     auto *library = new QComboBox;
     library->setObjectName("pathRepairLibrary");
@@ -106,10 +174,18 @@ void Window::showNasPathRepair() {
     auto *buttons = new QDialogButtonBox;
     auto *start = buttons->addButton("开始 / 继续处理", QDialogButtonBox::ActionRole);
     start->setObjectName("startPathRepair"); start->setEnabled(false);
+    if (authorizeOnly)
+        start->setText("连接并继续当前任务");
     auto *pause = buttons->addButton("暂停", QDialogButtonBox::ActionRole);
     pause->setObjectName("pausePathRepair"); pause->setEnabled(false);
     auto *close = buttons->addButton("关闭", QDialogButtonBox::RejectRole);
     layout->addWidget(buttons);
+    if (authorizeOnly) {
+        limit->hide();
+        if (auto *label = form->labelForField(limit)) label->hide();
+        bar->hide(); details->hide(); pause->hide();
+        dialog->resize(800, 570);
+    }
     connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
     connect(pause, &QPushButton::clicked, dialog, [=] {
         dialog->pause->store(true); pause->setEnabled(false); status->setText("正在完成当前文件并保存记录，随后暂停…");
@@ -131,7 +207,8 @@ void Window::showNasPathRepair() {
                 const QUrl device("smb:" + QString::fromUtf8(volume.device()));
                 if (!device.host().isEmpty()) endpoint->setText(device.host());
             }
-            output->setText(QFileInfo(l.root).dir().filePath("源音效兼容入口"));
+            if (output->text().isEmpty())
+                output->setText(QFileInfo(l.root).dir().filePath("源音效兼容入口"));
         }
     };
     defaults();
@@ -142,11 +219,20 @@ void Window::showNasPathRepair() {
         for (auto pair : {qMakePair(endpoint, "endpoint"), qMakePair(mount, "mount"), qMakePair(remote, "remote"), qMakePair(output, "output"), qMakePair(local, "local")})
             if (s.contains(pair.second)) pair.first->setText(s[pair.second].toString());
     }
+    if (authorizeOnly) {
+        const int index = library->findData(automaticSourceRepairLibrary_);
+        if (index >= 0) library->setCurrentIndex(index);
+    }
     struct Candidates { quint64 generation = 0; QList<Track> tracks; };
     auto candidates = std::make_shared<Candidates>();
     auto reload = [=, this] {
         const auto generation = ++candidates->generation;
         start->setEnabled(false); candidates->tracks.clear();
+        if (authorizeOnly) {
+            status->setText("填写 NAS 连接信息后，继续刚才暂停的任务。已有波形和续跑位置会保留。");
+            start->setEnabled(true);
+            return;
+        }
         auto *watcher = new QFutureWatcher<QPair<QList<Track>, QString>>(dialog);
         connect(watcher, &QFutureWatcherBase::finished, dialog, [=] {
             const auto result = watcher->result(); watcher->deleteLater();
@@ -190,11 +276,22 @@ void Window::showNasPathRepair() {
         dialog->running = true; dialog->pause->store(false);
         start->setEnabled(false); pause->setEnabled(true); close->setEnabled(false);
         for (auto *widget : QList<QWidget *>{library, endpoint, username, password, mount, remote, output, local, limit, choose, chooseLocal}) widget->setEnabled(false);
-        waveQueue_->pausePreparation();
+        if (!authorizeOnly)
+            waveQueue_->pausePreparation();
         status->setText("正在连接 NAS…"); bar->setRange(0, tracks.size()); bar->setValue(0);
-        auto *watcher = new QFutureWatcher<PathRepairResult>(dialog);
+        auto *watcher = new QFutureWatcher<RepairRun>(dialog);
         connect(watcher, &QFutureWatcherBase::finished, dialog, [=, this] {
-            const auto result = watcher->result(); watcher->deleteLater(); dialog->running = false;
+            auto run = watcher->result(); watcher->deleteLater(); dialog->running = false;
+            const auto result = std::move(run.result);
+            if (run.authenticated) {
+                sourceRepairCoordinator_->configure(std::move(run.session));
+                if (authorizeOnly) {
+                    if (!dialog->pause->load())
+                        waveQueue_->resumeAfterSourceRepair();
+                    dialog->accept();
+                    return;
+                }
+            }
             pause->setEnabled(false); close->setEnabled(true); start->setEnabled(true);
             for (auto *widget : QList<QWidget *>{library, endpoint, username, password, mount, remote, output, local, limit, choose, chooseLocal}) widget->setEnabled(true);
             QString text = result.error.isEmpty() ? QString("%1：已处理 %2 / %3 · 硬链接 %4 · 本机缓存 %5 · 复用 %6 · 未通过 %7。")
@@ -217,10 +314,22 @@ void Window::showNasPathRepair() {
         const auto endpointValue = endpoint->text().trimmed();
         watcher->setFuture(QtConcurrent::run([=, secret = std::move(secret)]() mutable {
             NativeRepairBackend backend;
-            PathRepairResult failed; failed.total = tracks.size();
-            if (!backend.client.login(endpointValue, share, account, secret, &failed.error)) { secret.fill(QChar(0)); return failed; }
+            RepairRun run;
+            run.result.total = tracks.size();
+            if (!backend.client.login(endpointValue, share, account, secret, &run.result.error)) {
+                secret.fill(QChar(0));
+                return run;
+            }
+            run.authenticated = true;
+            run.session.options = options;
+            run.session.host = endpointValue;
+            run.session.share = share;
+            run.session.account = account;
+            run.session.password = secret;
             secret.fill(QChar(0));
-            return runPathRepair(options, tracks, backend, pauseFlag.get(), [guard, status, bar, details](const QJsonObject &event) {
+            if (authorizeOnly)
+                return run;
+            run.result = runPathRepair(options, tracks, backend, pauseFlag.get(), [guard, status, bar, details](const QJsonObject &event) {
                 if (!guard) return;
                 QMetaObject::invokeMethod(guard, [=] {
                     bar->setValue(event["done"].toInt());
@@ -234,6 +343,7 @@ void Window::showNasPathRepair() {
                         (event["reusedEntry"].toBool() ? QString("复用已校验入口") : strategy == "hardlink" ? QString("硬链接已校验") : QString("本机缓存已校验")));
                 }, Qt::QueuedConnection);
             });
+            return run;
         }));
     });
     reload(); dialog->show();

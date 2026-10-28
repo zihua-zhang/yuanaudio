@@ -49,7 +49,8 @@ class CompatibleWorkerTests(unittest.TestCase):
                            compatibleModified=self.original_stat.st_mtime_ns // 1_000_000,
                            indexedSize=len(self.bytes), indexedModified=1000,
                            library='original-library', relative='日本語/原曲.wav',
-                           local=str(self.root / 'local'), shared=str(self.root / 'shared'))
+                           local=str(self.root / 'local'), shared=str(self.root / 'shared'),
+                           verificationCache=str(self.root / 'media-verification.sqlite'))
 
     def run_wave(self, config=None):
         result = subprocess.run([str(EXE), '--worker', 'wave'],
@@ -78,7 +79,7 @@ class CompatibleWorkerTests(unittest.TestCase):
                            compatibleSize=len(self.bytes), indexedSize=len(self.bytes),
                            compatibleModified=self.original_stat.st_mtime_ns // 1_000_000)
 
-    def test_wave_reports_progress_during_every_full_hash_pass(self):
+    def test_wave_hashes_once_then_reuses_receipt_across_workers(self):
         self.prepare_large_copy()
         for cached in (False, True):
             with self.subTest(cached=cached):
@@ -87,21 +88,22 @@ class CompatibleWorkerTests(unittest.TestCase):
                 verification = [(index, event) for index, event in enumerate(events)
                                 if event.get('event') == 'reading'
                                 and event.get('phase') == 'verification']
-                self.assertGreater(len(verification), 4, brief(events))
-                # Initial verification and the post-read/cache stability check both
-                # report progress; neither is a decode/completion receipt.
+                self.assertGreaterEqual(len(verification), 2, brief(events))
+                # Initial and stability guards still run. A receipt hit is a zero
+                # heartbeat, never a positive audio read or a completion receipt.
                 self.assertGreaterEqual(sum(event['bytes'] == 0 for _, event in verification), 2)
                 self.assertTrue(all('complete' not in event and 'milliseconds' not in event
                                     for _, event in verification))
-                first_decode = next((index for index, event in enumerate(events)
-                                     if event.get('event') in ('duration', 'wave')), len(events))
-                before_decode = [event['bytes'] for index, event in verification if index < first_decode]
-                self.assertEqual(before_decode[0], 0)
-                self.assertEqual(before_decode[-1], len(self.bytes))
-                positive_steps = [later - earlier for earlier, later in zip(before_decode, before_decode[1:])
-                                  if later > earlier]
-                self.assertTrue(positive_steps)
-                self.assertLessEqual(max(positive_steps), 1024 * 1024)
+                positions = [event['bytes'] for _, event in verification]
+                self.assertEqual(positions[0], 0)
+                if cached:
+                    self.assertEqual(max(positions), 0, brief(events))
+                else:
+                    self.assertEqual(max(positions), len(self.bytes))
+                    positive_steps = [later - earlier for earlier, later in zip(positions, positions[1:])
+                                      if later > earlier]
+                    self.assertTrue(positive_steps)
+                    self.assertLessEqual(max(positive_steps), 1024 * 1024)
                 completed = next(index for index, event in enumerate(events)
                                  if event.get('event') == 'wave' and event.get('complete'))
                 self.assertLess(verification[-1][0], completed)

@@ -1,4 +1,5 @@
 #include "index.h"
+#include "media_source.h"
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -30,6 +31,30 @@ Track indexedTrack(const QString &root) {
 class CompatibleSourcesTests : public QObject {
     Q_OBJECT
   private slots:
+    void registeringVerifiedMappingSeedsTheProfileReceipt() {
+        QTemporaryDir temp;
+        const auto copy = temp.filePath("compatible.mp3");
+        const auto database = temp.filePath("index.sqlite");
+        QVERIFY(writeFile(copy, "abc"));
+        {
+            Index db(database);
+            QVERIFY(db.open());
+            QVERIFY(db.saveLibrary({"library", "Music", temp.path(), ""}));
+            QVERIFY(db.upsert({indexedTrack(temp.path())}));
+            const auto original = *db.trackByIdentity("library", "日文/原曲.mp3");
+            QVERIFY(db.setCompatibleSource(original, copy, abcSha));
+        }
+        Index reopened(database);
+        QVERIFY(reopened.open());
+        const auto mapped = reopened.trackByIdentity("library", "日文/原曲.mp3");
+        QVERIFY(mapped);
+        qint64 read = 0;
+        QString error;
+        QCOMPARE(verifiedMediaPath(*mapped, &error, [&](qint64 bytes) { read = qMax(read, bytes); },
+                                   temp.filePath("media-verification.sqlite")), copy);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(read, qint64(0));
+    }
     void compatibleSourceKeepsOriginalIdentityAndPersonalMetadata() {
         QTemporaryDir temp;
         const auto root = temp.filePath("originals");

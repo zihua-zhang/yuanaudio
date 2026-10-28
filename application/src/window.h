@@ -35,6 +35,7 @@ class QStackedWidget;
 class QVBoxLayout;
 class QHelpEvent;
 class QDialog;
+class SourceRepairCoordinator;
 
 class TrackModel : public QAbstractTableModel {
     Q_OBJECT
@@ -205,6 +206,9 @@ class Window : public QMainWindow {
     TrackTable *table_ = nullptr;
     TrackModel *model_;
     WaveQueue *waveQueue_;
+    SourceRepairCoordinator *sourceRepairCoordinator_ = nullptr;
+    QString automaticSourceRepairLibrary_;
+    bool playerSourceRepairReload_ = false;
     RowWaveDelegate *rowWave_ = nullptr;
     QPushButton *play_, *favorite_, *more_, *refresh_, *cancel_;
     QCheckBox *autoPlay_;
@@ -269,7 +273,8 @@ class Window : public QMainWindow {
     bool eventFilter(QObject *object, QEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
     void refreshSearch(bool append = false);
-    void showNasPathRepair();
+    void showNasPathRepair(bool authorizeOnly = false);
+    void setupAutomaticSourceRepair();
     void addLibrary();
     void beginScan(const Library &library);
     void selectTrack(int row, std::optional<double> ratio = std::nullopt);

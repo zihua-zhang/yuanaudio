@@ -1,5 +1,6 @@
 #include "media_drag.h"
 #include "media_source.h"
+#include <QDir>
 #include <QEventLoop>
 #include <QFileInfo>
 #include <QFutureWatcher>
@@ -68,7 +69,9 @@ QFuture<MediaDragResult> verifiedMediaUrlsAsync(const QList<Track> &snapshots, c
         for (const auto &track : tracks) {
             if (promise.isCanceled())
                 return;
-            const auto path = verifiedMediaPath(track, &result.error);
+            const auto verificationCache = catalogPath.isEmpty() ? QString()
+                : QFileInfo(catalogPath).dir().filePath("media-verification.sqlite");
+            const auto path = verifiedMediaPath(track, &result.error, {}, verificationCache);
             if (path.isEmpty()) {
                 result.urls.clear();
                 if (result.error.isEmpty())

@@ -90,6 +90,7 @@ bool WaveQueue::drainParallel() {
 
 void WaveQueue::scheduleParallel() {
     if (parallelWorker_ || preparationConcurrency_ <= 1 || !batchRunning_ || retryMode_ ||
+        sourceRepairPaused_ ||
         !deferReason_.isEmpty() || failureWriting_ || failureWrites_->retryNeeded.load() ||
         pendingOutcomes_.size() >= OutcomeChunkSize || cancelled_ || (active_.id && !background_))
         return;
@@ -129,6 +130,7 @@ void WaveQueue::scheduleParallel() {
             slot.worker = new WaveQueue(localCache_, this);
             auto *child = slot.worker;
             child->parallelWorker_ = true;
+            child->sourceRepairOwner_ = this;
             child->workerProgram_ = workerProgram_;
             connect(child, &WaveQueue::changed, this, [this, available, child](const Track &changedTrack) {
                 if (!available->track.id || available->done || key(available->track) != key(changedTrack))
@@ -164,6 +166,8 @@ void WaveQueue::scheduleParallel() {
         slot.done = slot.success = false;
         auto *child = slot.worker;
         child->libraries_ = libraries_;
+        child->verificationCache_ = verificationCache_;
+        child->sourceRepairHandler_ = sourceRepairHandler_;
         child->batchRate_ = backgroundJobRate();
         child->parallelPublish_ = publish;
         child->entries_.clear();
