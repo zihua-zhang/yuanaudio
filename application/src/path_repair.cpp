@@ -88,7 +88,7 @@ QString copyName(const QString &name) {
     return clean + (suffix.isEmpty() ? QString() : "." + suffix);
 }
 std::optional<NasRepairFile> resolve(PathRepairBackend &nas, const QString &serverRoot,
-                                    const QString &relative, QString *error) {
+                                    const QString &relative, const Track &expected, QString *error) {
     QString path = serverRoot;
     const auto parts = relative.split('/');
     NasRepairFile found;
@@ -99,6 +99,50 @@ std::optional<NasRepairFile> resolve(PathRepairBackend &nas, const QString &serv
         for (const auto &entry : entries)
             if (entry.name.normalized(QString::NormalizationForm_C) == parts[i].normalized(QString::NormalizationForm_C))
                 matches << entry;
+        if (matches.size() > 1 && i + 1 == parts.size() && expected.size > 0 && expected.modified > 0) {
+            // Only the final file's indexed version can distinguish normalized
+            // spellings. Every alternative must remain known and unchanged;
+            // an unreadable or changing alternative cannot be ruled out.
+            for (const auto &entry : matches)
+                if (entry.path != path + '/' + entry.name || entry.name.contains('/') ||
+                    entry.name == ".." || entry.name == "." || entry.directory) {
+                    *error = "NAS 返回的同名候选路径或文件类型不一致"; return {};
+                }
+            auto sameCandidate = [](const NasRepairFile &listed, const NasRepairFile &fresh) {
+                return !fresh.directory && listed.path == fresh.path && listed.name == fresh.name &&
+                       listed.size > 0 && listed.modified > 0 && listed.size == fresh.size &&
+                       listed.modified == fresh.modified && (!listed.fileId || listed.fileId == fresh.fileId);
+            };
+            bool stable = true;
+            QList<NasRepairFile> versions;
+            for (const auto &entry : matches) {
+                QString statError;
+                const auto fresh = nas.stat(entry.path, &statError);
+                if (!statError.isEmpty() || !fresh || !sameCandidate(entry, *fresh))
+                    stable = false;
+                else if (fresh->size == expected.size && fresh->modified == expected.modified)
+                    versions << *fresh;
+            }
+            // A candidate added/removed/changed during the stats would invalidate
+            // the uniqueness proof even if the selected file itself stayed stable.
+            QString listError;
+            const auto current = nas.list(path, &listError);
+            QList<NasRepairFile> currentMatches;
+            for (const auto &entry : current)
+                if (entry.name.normalized(QString::NormalizationForm_C) == parts[i].normalized(QString::NormalizationForm_C))
+                    currentMatches << entry;
+            stable &= listError.isEmpty() && currentMatches.size() == matches.size();
+            for (const auto &entry : matches) {
+                int confirmed = 0;
+                for (const auto &fresh : currentMatches)
+                    if (sameCandidate(entry, fresh)) ++confirmed;
+                stable &= confirmed == 1;
+            }
+            if (!stable) {
+                *error = "NAS 同名候选不可完整确认或在定位期间发生变化，未猜选"; return {};
+            }
+            if (versions.size() == 1) matches = versions;
+        }
         if (matches.size() != 1) {
             *error = matches.isEmpty() ? "NAS 端未找到对应路径" : "规范化后存在多个同名路径，未猜选";
             return {};
@@ -224,7 +268,7 @@ static PathRepairResult runCopyRepair(const PathRepairOptions &o, const QList<Tr
         if (!safeRelative(t.relativePath) || !within(t.root, o.mountRoot)) error = "原文件相对路径或挂载范围无效";
         else relative = QDir(o.mountRoot).relativeFilePath(t.absolutePath());
         std::optional<NasRepairFile> source;
-        if (error.isEmpty() && safeRelative(relative)) source = resolve(nas, o.serverRoot, relative, &error);
+        if (error.isEmpty() && safeRelative(relative)) source = resolve(nas, o.serverRoot, relative, t, &error);
         else if (error.isEmpty()) error = "原文件路径越出挂载目录";
         if (source && ((t.size > 0 && source->size != t.size) ||
                        (t.modified > 0 && source->modified != t.modified))) error = "NAS 原件版本与索引不一致，请定点刷新后重试";
@@ -468,7 +512,7 @@ PathRepairResult runPathRepair(const PathRepairOptions &o, const QList<Track> &t
         else relative = QDir(o.mountRoot).relativeFilePath(t.absolutePath());
         std::optional<NasRepairFile> source;
         if (error.isEmpty() && safeRelative(relative)) {
-            const auto listed = resolve(nas, o.serverRoot, relative, &error);
+            const auto listed = resolve(nas, o.serverRoot, relative, t, &error);
             if (listed) {
                 source = nas.stat(listed->path, &error);
                 if (source && !sameSource(*listed, *source)) error = "NAS 原件在定位期间发生变化";

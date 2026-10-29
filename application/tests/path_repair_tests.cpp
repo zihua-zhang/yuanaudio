@@ -68,15 +68,30 @@ class FixtureNas : public PathRepairBackend {
 public:
     QHash<QString, QList<NasRepairFile>> directories;
     QHash<QString, QByteArray> audio;
+    QHash<QString, NasRepairFile> freshStats;
+    QSet<QString> failedStats;
+    std::function<void(const QString &)> afterStat;
+    QStringList downloadedPaths;
     int downloads = 0;
     bool storage = false;
     bool storageFailure() const override { return storage; }
     QList<NasRepairFile> list(const QString &path, QString *error) override {
+        error->clear();
         if (!directories.contains(path)) *error = "missing directory";
         return directories.value(path);
     }
+    std::optional<NasRepairFile> stat(const QString &path, QString *error) override {
+        error->clear();
+        if (failedStats.contains(path)) { *error = "stat unavailable"; return {}; }
+        const auto result = freshStats.contains(path)
+                                ? std::optional<NasRepairFile>(freshStats.value(path))
+                                : PathRepairBackend::stat(path, error);
+        if (afterStat) afterStat(path);
+        return result;
+    }
     bool download(const QString &path, const QString &destination, QByteArray *sha, QString *error) override {
         ++downloads;
+        downloadedPaths << path;
         if (storage) { *error = "destination write failed"; return false; }
         if (!audio.contains(path)) { *error = "unavailable"; return false; }
         QFile out(destination);
@@ -117,6 +132,21 @@ class PathRepairTests : public QObject {
             nas.directories["/volume2/share/original"] = {{source, name, 3, 1000, false}};
             nas.audio[source] = "abc";
         }
+        QStringList normalizationCollision(qint64 otherSize = 9, qint64 otherModified = 2000) {
+            track.id = 0;
+            track.name = track.relativePath = QString::fromUtf8("가곡.flac");
+            Index index(options.indexPath); index.open(); index.upsert({track});
+            track = *index.trackByIdentity("lib", track.relativePath);
+            const auto fullNfd = track.name.normalized(QString::NormalizationForm_D);
+            const auto mixed = QString::fromUtf8("가") +
+                               QString::fromUtf8("곡").normalized(QString::NormalizationForm_D) + ".flac";
+            const auto folder = QString("/volume2/share/original");
+            const auto first = folder + '/' + fullNfd, second = folder + '/' + mixed;
+            nas.directories[folder] = {{first, fullNfd, 3, 1000, false, 144271, 1},
+                                       {second, mixed, otherSize, otherModified, false, 144056, 1}};
+            nas.audio.clear(); nas.audio[first] = "abc"; nas.audio[second] = "wrongdata";
+            return {first, second};
+        }
     };
 #ifndef Q_OS_WIN
     struct LinkContext {
@@ -152,6 +182,108 @@ class PathRepairTests : public QObject {
     };
 #endif
 private slots:
+    void finalCollisionUsesTheUniqueFreshIndexedVersion_data() {
+        QTest::addColumn<bool>("preferHardLinks");
+        QTest::addColumn<qint64>("otherSize");
+        QTest::addColumn<qint64>("otherModified");
+        QTest::newRow("copy-mode") << false << qint64(9) << qint64(2000);
+        QTest::newRow("hardlink-mode-local-fallback") << true << qint64(9) << qint64(2000);
+        QTest::newRow("only-mtime-distinguishes") << false << qint64(3) << qint64(2000);
+        QTest::newRow("only-size-distinguishes") << false << qint64(9) << qint64(1000);
+    }
+    void finalCollisionUsesTheUniqueFreshIndexedVersion() {
+        QFETCH(bool, preferHardLinks);
+        QFETCH(qint64, otherSize); QFETCH(qint64, otherModified);
+        Context c;
+        const auto paths = c.normalizationCollision(otherSize, otherModified);
+        QVERIFY(QFileInfo(paths[0]).fileName() != c.track.name);
+        QVERIFY(QFileInfo(paths[1]).fileName() != c.track.name);
+        c.options.preferHardLinks = preferHardLinks;
+        c.options.localCacheRoot = QDir(QFileInfo(c.temp.path()).canonicalFilePath()).filePath("local-cache");
+        std::atomic_bool pause{false};
+        const auto result = runPathRepair(c.options, {c.track}, c.nas, &pause, {});
+        QVERIFY2(result.error.isEmpty(), qPrintable(result.error));
+        QVERIFY2(result.lastError.isEmpty(), qPrintable(result.lastError));
+        QCOMPARE(result.succeeded, 1);
+        QCOMPARE(result.failed, 0);
+        QCOMPARE(c.nas.downloadedPaths, QStringList{paths[0]});
+        Index index(c.options.indexPath); QVERIFY(index.open());
+        const auto mapped = index.trackByIdentity("lib", c.track.relativePath);
+        QVERIFY(mapped);
+        QFile copy(mapped->sourcePath()); QVERIFY(copy.open(QIODevice::ReadOnly));
+        QCOMPARE(copy.readAll(), QByteArray("abc"));
+    }
+    void finalCollisionRefusesNonuniqueOrUnknownVersions_data() {
+        QTest::addColumn<qint64>("indexedSize");
+        QTest::addColumn<qint64>("indexedModified");
+        QTest::addColumn<qint64>("otherSize");
+        QTest::addColumn<qint64>("otherModified");
+        QTest::newRow("both-match") << qint64(3) << qint64(1000) << qint64(3) << qint64(1000);
+        QTest::newRow("neither-match") << qint64(5) << qint64(1000) << qint64(9) << qint64(2000);
+        QTest::newRow("unknown-index-size") << qint64(0) << qint64(1000) << qint64(9) << qint64(2000);
+        QTest::newRow("unknown-index-time") << qint64(3) << qint64(0) << qint64(9) << qint64(2000);
+        QTest::newRow("unknown-alternative-size") << qint64(3) << qint64(1000) << qint64(0) << qint64(2000);
+        QTest::newRow("unknown-alternative-time") << qint64(3) << qint64(1000) << qint64(9) << qint64(0);
+    }
+    void finalCollisionRefusesNonuniqueOrUnknownVersions() {
+        QFETCH(qint64, indexedSize); QFETCH(qint64, indexedModified);
+        QFETCH(qint64, otherSize); QFETCH(qint64, otherModified);
+        Context c; c.normalizationCollision(otherSize, otherModified);
+        c.track.size = indexedSize; c.track.modified = indexedModified;
+        std::atomic_bool pause{false};
+        const auto result = runPathRepair(c.options, {c.track}, c.nas, &pause, {});
+        QCOMPARE(result.succeeded, 0); QCOMPARE(result.failed, 1);
+        QCOMPARE(c.nas.downloads, 0);
+    }
+    void finalCollisionFreshStatsMustConfirmEveryListedAlternative_data() {
+        QTest::addColumn<QString>("change");
+        for (const auto &change : {"becomes-matching", "size", "mtime", "inode", "path", "name", "directory", "unreadable"})
+            QTest::newRow(change) << QString::fromLatin1(change);
+    }
+    void finalCollisionFreshStatsMustConfirmEveryListedAlternative() {
+        QFETCH(QString, change);
+        Context c; const auto paths = c.normalizationCollision();
+        auto alternative = c.nas.directories["/volume2/share/original"][1];
+        if (change == "becomes-matching") { alternative.size = 3; alternative.modified = 1000; }
+        else if (change == "size") ++alternative.size;
+        else if (change == "mtime") ++alternative.modified;
+        else if (change == "inode") ++alternative.fileId;
+        else if (change == "path") alternative.path += ".different";
+        else if (change == "name") alternative.name += ".different";
+        else if (change == "directory") alternative.directory = true;
+        else if (change == "unreadable") c.nas.failedStats.insert(paths[1]);
+        c.nas.freshStats[paths[1]] = alternative;
+        std::atomic_bool pause{false};
+        const auto result = runPathRepair(c.options, {c.track}, c.nas, &pause, {});
+        QCOMPARE(result.succeeded, 0); QCOMPARE(result.failed, 1);
+        QCOMPARE(c.nas.downloads, 0);
+    }
+    void finalCollisionRefusesAChangedCandidateListing() {
+        Context c; const auto paths = c.normalizationCollision();
+        c.nas.afterStat = [&](const QString &path) {
+            if (path == paths[1])
+                c.nas.directories["/volume2/share/original"].append(
+                    {"/volume2/share/original/" + c.track.name, c.track.name, 3, 1000, false, 144272, 1});
+        };
+        std::atomic_bool pause{false};
+        const auto result = runPathRepair(c.options, {c.track}, c.nas, &pause, {});
+        QCOMPARE(result.succeeded, 0); QCOMPARE(result.failed, 1);
+        QCOMPARE(c.nas.downloads, 0);
+    }
+    void indexedFileMetadataNeverDisambiguatesAnIntermediateDirectory() {
+        Context c;
+        const auto folder = QString("/volume2/share/original");
+        const auto name = QString::fromUtf8("가곡");
+        const auto nfd = name.normalized(QString::NormalizationForm_D);
+        const auto mixed = QString::fromUtf8("가") + QString::fromUtf8("곡").normalized(QString::NormalizationForm_D);
+        c.nas.directories[folder] = {{folder + '/' + nfd, nfd, 3, 1000, true},
+                                     {folder + '/' + mixed, mixed, 9, 2000, true}};
+        c.track.relativePath = name + '/' + c.track.name;
+        std::atomic_bool pause{false};
+        const auto result = runPathRepair(c.options, {c.track}, c.nas, &pause, {});
+        QCOMPARE(result.succeeded, 0); QCOMPARE(result.failed, 1);
+        QCOMPARE(c.nas.downloads, 0);
+    }
 #ifndef Q_OS_WIN
     void hardlinkUsesFreshInodesAndNeverDownloads() {
         LinkContext c; std::atomic_bool pause{false};

@@ -496,7 +496,7 @@ Window::Window(const QString &root, const QString &legacyDatabase, const QString
     durationWriteRetry_.setSingleShot(true);
     connect(&durationWriteRetry_, &QTimer::timeout, this, &Window::flushDurationWrite);
     connect(table_, &TrackTable::viewportChanged, this, [this] { viewportDebounce_.start(); });
-    setWindowTitle("源音效管理工具 · 0.12.5");
+    setWindowTitle("源音效管理工具 · 0.12.6");
     resize(1320, 850);
     setMinimumSize(980, 640);
     debounce_.setSingleShot(true);
@@ -701,7 +701,7 @@ void Window::buildUi() {
     heading->setObjectName("brandTitle");
     heading->setFixedWidth(166);
     top->addWidget(heading);
-    heading->setToolTip("源音效管理工具 0.12.5 · 原文件工作流");
+    heading->setToolTip("源音效管理工具 0.12.6 · 原文件工作流");
     top->addSpacing(4);
     search_ = new QLineEdit;
     search_->setObjectName("musicSearch");
