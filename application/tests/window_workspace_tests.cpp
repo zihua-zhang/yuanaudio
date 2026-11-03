@@ -4,7 +4,11 @@
 #include <QComboBox>
 #include <QDir>
 #include <QFileInfo>
+#include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
+#include <QSettings>
+#include <QTimer>
 #include <QPushButton>
 #include <QScopeGuard>
 #include <QSemaphore>
@@ -37,10 +41,58 @@ class Window08Tests : public QObject {
     }
 
   private slots:
-    void workspaceDefaultsCollapsedAndKeepsItsOwnVisibilityAndList() {
+    void trackMenuOffersFinderAndNoCandidateActions() {
         QTemporaryDir data;
         QVERIFY(!seed(data.path()).isEmpty());
-        qint64 candidate = 0;
+        Window window(data.path());
+        window.show();
+        QTRY_VERIFY(window.indexReady_ && !window.loading_ && window.model_->rowCount() == 2);
+        QStringList actions;
+        QTimer::singleShot(0, &window, [&] {
+            for (auto *menu : window.findChildren<QMenu *>()) {
+                if (!menu->isVisible()) continue;
+                for (auto *action : menu->actions()) actions << action->text();
+                menu->close();
+            }
+        });
+        const auto point = window.table_->visualRect(window.model_->index(1, 1)).center();
+        window.table_->customContextMenuRequested(point);
+#ifdef Q_OS_MACOS
+        QVERIFY(actions.contains("在 Finder 中显示"));
+#else
+        QVERIFY(actions.contains("在文件管理器中显示"));
+#endif
+        for (const auto &action : actions) QVERIFY(!action.contains("候选"));
+    }
+    void retiredCandidateModeFallsBackToRecentWithoutDeletingLegacyData() {
+        QTemporaryDir data;
+        const auto tracks = seed(data.path());
+        qint64 legacyList = 0;
+        {
+            WorkspaceStore store(data.filePath("workspace.sqlite"));
+            QVERIFY(store.open());
+            legacyList = store.createList("旧项目候选");
+            QVERIFY(store.addCandidate(legacyList, tracks[0]));
+            QVERIFY(store.recordAudition(tracks[1]));
+            QSettings settings(data.filePath("workspace-ui.ini"), QSettings::IniFormat);
+            settings.setValue("mode", 0); // Old Candidates mode.
+            settings.setValue("expanded", true);
+        }
+        Window window(data.path());
+        window.show();
+        QTRY_VERIFY(window.indexReady_ && !window.loading_);
+        auto *mode = window.workspace_->findChild<QComboBox *>("workspaceMode");
+        QVERIFY(mode);
+        QCOMPARE(mode->count(), 2);
+        QCOMPARE(mode->currentText(), QString("最近试听"));
+        auto *rows = window.workspace_->findChild<WorkspaceTrackList *>("workspaceRows");
+        QCOMPARE(rows->count(), 1);
+        QVERIFY(rows->item(0)->text().contains(tracks[1].name));
+        QCOMPARE(window.workspace_->store().candidates(legacyList).size(), 1);
+    }
+    void workspaceDefaultsCollapsedAndKeepsItsOwnVisibilityAndMode() {
+        QTemporaryDir data;
+        QVERIFY(!seed(data.path()).isEmpty());
         {
             Window window(data.path());
             window.show();
@@ -49,10 +101,7 @@ class Window08Tests : public QObject {
             QVERIFY(window.workspaceToggle_);
             QVERIFY(!window.workspaceToggle_->isChecked());
             QVERIFY(!window.workspace_->isVisible());
-            candidate = window.workspace_->store().createList("第三集");
-            QVERIFY(candidate);
-            window.workspace_->refresh();
-            window.workspace_->setCurrentCandidateList(candidate);
+            window.workspace_->setMode(WorkspacePanel::Folders);
             window.workspaceToggle_->setChecked(true);
             QVERIFY(window.workspace_->isVisible());
             QVERIFY(window.workspace_->height() <= 230);
@@ -62,7 +111,7 @@ class Window08Tests : public QObject {
         QTRY_VERIFY(reopened.indexReady_ && !reopened.loading_);
         QVERIFY(reopened.workspaceToggle_->isChecked());
         QVERIFY(reopened.workspace_->isVisible());
-        QCOMPARE(reopened.workspace_->currentCandidateList(), candidate);
+        QCOMPARE(reopened.workspace_->findChild<QComboBox *>("workspaceMode")->currentText(), QString("常用目录"));
     }
     void workspaceActivationResolvesCurrentVersionByIdentity() {
         QTemporaryDir data;
@@ -84,7 +133,7 @@ class Window08Tests : public QObject {
             QVERIFY(db.open());
             QVERIFY(db.upsert({updated}));
         }
-        QVERIFY(window.workspace_->addCandidate(snapshot));
+        QVERIFY(window.workspace_->recordAudition(snapshot));
         window.workspace_->trackActivated(snapshot);
         QTRY_COMPARE(window.selected_.relativePath, updated.relativePath);
         QCOMPARE(window.selected_.id, tracks[0].id);
@@ -131,14 +180,26 @@ class Window08Tests : public QObject {
         window.selectTrackValue(tracks[1]);
         auto missing = tracks[0];
         missing.relativePath = "已移走/找不到.wav";
-        QVERIFY(window.workspace_->addCandidate(missing));
+        QVERIFY(window.workspace_->recordAudition(missing));
         const auto token = window.workspaceRequest_;
         window.workspace_->trackActivated(missing);
         QVERIFY(window.workspaceRequest_ > token);
         window.searchPool_.waitForDone();
         QTest::qWait(100);
         QCOMPARE(window.selected_.id, tracks[1].id);
-        QCOMPARE(window.workspace_->store().candidates(window.workspace_->currentCandidateList()).size(), 1);
+        QVERIFY(!window.workspace_->store().recents().isEmpty());
+    }
+    void missingOriginalReportsUnavailableWithoutLaunchingFileManager() {
+        QTemporaryDir data;
+        const auto tracks = seed(data.path());
+        Window window(data.path());
+        window.show();
+        QTRY_VERIFY(window.indexReady_ && !window.loading_);
+        const auto before = window.findChildren<QProcess *>().size();
+        window.revealOriginalFile(tracks[0]);
+        QTRY_VERIFY(window.status_->text().contains("原文件不存在或暂时不可访问"));
+        QCOMPARE(window.findChildren<QProcess *>().size(), before);
+        QVERIFY(window.status_->text().contains(tracks[0].absolutePath()));
     }
     void pinnedFolderUsesExistingTreeNavigation() {
         QTemporaryDir data;

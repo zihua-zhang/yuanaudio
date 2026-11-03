@@ -44,10 +44,10 @@ class WorkspaceTests : public QObject {
         {
             WorkspaceStore store(database);
             QVERIFY2(store.open(), qPrintable(store.lastError()));
-            const auto lists = store.candidateLists();
-            QCOMPARE(lists.size(), 1);
-            QCOMPARE(lists[0].name, QString("本剧候选"));
-            defaultList = lists[0].id;
+            QVERIFY(store.candidateLists().isEmpty());
+            // Seed legacy data explicitly: the current UI no longer creates lists.
+            defaultList = store.createList("本剧候选");
+            QVERIFY(defaultList);
             second = store.createList("第二部短剧");
             QVERIFY(second);
             QVERIFY(store.addCandidate(defaultList, a));
@@ -82,16 +82,14 @@ class WorkspaceTests : public QObject {
             QVERIFY(audio.open(QIODevice::ReadOnly));
             QCOMPARE(audio.readAll(), QByteArray("unchanged original music"));
             QVERIFY(store.removeList(defaultList));
-            QCOMPARE(store.candidateLists().size(), 1);
-            QCOMPARE(store.candidateLists()[0].name, QString("本剧候选"));
-            QVERIFY(store.candidates(store.candidateLists()[0].id).isEmpty());
+            QVERIFY(store.candidateLists().isEmpty());
         }
     }
     void candidateIdentityUsesLibraryAndRelativePathNotLocalRowId() {
         QTemporaryDir data;
         WorkspaceStore store(data.filePath("workspace.sqlite"));
         QVERIFY(store.open());
-        const auto list = store.candidateLists()[0].id;
+        const auto list = store.createList("本剧候选");
         auto a = track(1);
         QVERIFY(store.addCandidate(list, a));
         a.id = 999;
@@ -210,11 +208,14 @@ class WorkspaceTests : public QObject {
         WorkspacePanel panel(data.filePath("workspace.sqlite"));
         panel.resize(180, 300);
         panel.show();
-        QVERIFY(panel.addCandidate(track(1)));
+        auto *mode = panel.findChild<QComboBox *>("workspaceMode");
+        QCOMPARE(mode->count(), 2);
+        QCOMPARE(mode->currentText(), QString("最近试听"));
+        QVERIFY(panel.recordAudition(track(1)));
         auto *rows = panel.findChild<WorkspaceTrackList *>("workspaceRows");
         QVERIFY(rows);
         QCOMPARE(rows->count(), 1);
-        QVERIFY(panel.store().recents().isEmpty());
+        QCOMPARE(panel.store().recents().size(), 1);
         Track activated;
         connect(&panel, &WorkspacePanel::trackActivated, &panel, [&](const Track &t) {
             activated = t;
@@ -231,12 +232,6 @@ class WorkspaceTests : public QObject {
         activateCurrentRow();
         QCOMPARE(activated.id, qint64(1));
         QCOMPARE(panel.store().recents().size(), 1);
-        const auto second = panel.store().createList("第二集");
-        QVERIFY(second);
-        panel.refresh();
-        panel.setCurrentCandidateList(second);
-        QVERIFY(panel.addCandidate(track(2)));
-        QCOMPARE(rows->count(), 1);
         panel.setMode(WorkspacePanel::Recent);
         QCOMPARE(rows->count(), 1);
         QVERIFY(rows->item(0)->toolTip().contains(track(1).absolutePath()));

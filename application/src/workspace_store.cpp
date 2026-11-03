@@ -120,7 +120,6 @@ bool WorkspaceStore::open() {
         "CREATE TABLE IF NOT EXISTS pinned_folders(position INTEGER PRIMARY KEY AUTOINCREMENT, "
         "library TEXT NOT NULL, path TEXT NOT NULL, name TEXT NOT NULL, root TEXT NOT NULL, "
         "UNIQUE(library,path))",
-        "INSERT INTO candidate_lists(name) SELECT '本剧候选' WHERE NOT EXISTS(SELECT 1 FROM candidate_lists)",
         "PRAGMA user_version=1"};
     for (const auto &sql : schema)
         if (!q.exec(sql))
@@ -189,9 +188,6 @@ bool WorkspaceStore::removeList(qint64 id) {
         return fail(q.lastError().text());
     if (q.numRowsAffected() != 1)
         return fail("这个候选清单已不存在。");
-    if (!q.exec("INSERT INTO candidate_lists(name) SELECT '本剧候选' "
-                "WHERE NOT EXISTS(SELECT 1 FROM candidate_lists)"))
-        return fail(q.lastError().text());
     if (!db_.commit())
         return fail(db_.lastError().text());
     rollback.dismiss();

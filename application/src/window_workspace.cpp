@@ -4,6 +4,9 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDir>
+#include <QDesktopServices>
+#include <QFileInfo>
+#include <QUrl>
 #include <QFutureWatcher>
 #include <QInputDialog>
 #include <QLabel>
@@ -323,7 +326,7 @@ void Window::setupWorkspace(QVBoxLayout *left) {
     workspaceToggle_ = new QPushButton("个人工作区");
     workspaceToggle_->setObjectName("workspaceToggle");
     workspaceToggle_->setCheckable(true);
-    workspaceToggle_->setToolTip("候选清单、最近试听与常用目录 · 只保存在本机");
+    workspaceToggle_->setToolTip("最近试听与常用目录 · 只保存在本机");
     left->addWidget(workspaceToggle_);
     workspace_ = new WorkspacePanel(QDir(dataRoot_).filePath("workspace.sqlite"), this);
     workspace_->setCatalogPath(databasePath_);
@@ -331,8 +334,8 @@ void Window::setupWorkspace(QVBoxLayout *left) {
     left->addWidget(workspace_);
     const auto settingsPath = QDir(dataRoot_).filePath("workspace-ui.ini");
     QSettings settings(settingsPath, QSettings::IniFormat);
-    workspace_->setCurrentCandidateList(settings.value("candidateList", 0).toLongLong());
-    workspace_->setMode(WorkspacePanel::Mode(qBound(0, settings.value("mode", 0).toInt(), 2)));
+    workspace_->setMode(settings.value("mode", 1).toInt() == WorkspacePanel::Folders
+                            ? WorkspacePanel::Folders : WorkspacePanel::Recent);
     const bool expanded = settings.value("expanded", false).toBool();
     workspaceToggle_->setChecked(expanded);
     workspace_->setVisible(expanded);
@@ -342,19 +345,15 @@ void Window::setupWorkspace(QVBoxLayout *left) {
         preferences.setValue("expanded", visible);
     });
     auto *mode = workspace_->findChild<QComboBox *>("workspaceMode");
-    auto *lists = workspace_->findChild<QComboBox *>("candidateLists");
-    connect(mode, &QComboBox::currentIndexChanged, this, [settingsPath](int index) {
+    connect(mode, &QComboBox::currentIndexChanged, this, [settingsPath, mode] {
         QSettings preferences(settingsPath, QSettings::IniFormat);
-        preferences.setValue("mode", index);
-    });
-    connect(lists, &QComboBox::currentIndexChanged, this, [this, settingsPath] {
-        QSettings preferences(settingsPath, QSettings::IniFormat);
-        preferences.setValue("candidateList", workspace_->currentCandidateList());
+        preferences.setValue("mode", mode->currentData());
     });
 }
 
 void Window::connectWorkspace() {
     connect(workspace_, &WorkspacePanel::warning, this, &Window::setStatus);
+    connect(workspace_, &WorkspacePanel::revealTrackRequested, this, &Window::revealOriginalFile);
     connect(workspace_, &WorkspacePanel::trackActivated, this, &Window::activateWorkspaceTrack);
     connect(workspace_, &WorkspacePanel::folderActivated, this,
             [this](const QString &library, const QString &path) { locateFolder(library, path); });
@@ -365,24 +364,25 @@ void Window::connectWorkspace() {
             return;
         const auto track = model_->tracks[at.row()];
         QMenu menu(this);
+#ifdef Q_OS_MACOS
+        auto *reveal = menu.addAction("在 Finder 中显示");
+#else
+        auto *reveal = menu.addAction("在文件管理器中显示");
+#endif
         auto *locate = menu.addAction("在左侧定位文件夹");
-        const auto name = workspace_->findChild<QComboBox *>("candidateLists")->currentText();
-        auto *candidate = menu.addAction(QString("加入「%1」候选").arg(name));
         menu.addSeparator();
         auto *exclude = menu.addAction("仅从列表排除（保留原文件）…");
         auto *trash = menu.addAction("移入系统回收站并从列表移除…");
         exclude->setEnabled(!catalogBusy_);
         trash->setEnabled(!catalogBusy_);
-        menu.setDefaultAction(exclude);
+        menu.setDefaultAction(reveal);
         const auto chosen = menu.exec(table_->viewport()->mapToGlobal(point));
         if (!chosen)
             return;
-        if (chosen == locate) {
+        if (chosen == reveal) {
+            revealOriginalFile(track);
+        } else if (chosen == locate) {
             locateFolder(track.libraryId, track.folder == "." ? QString("") : track.folder);
-        } else if (chosen == candidate && workspace_->addCandidate(track)) {
-            workspace_->setMode(WorkspacePanel::Candidates);
-            workspaceToggle_->setChecked(true);
-            setStatus("已加入候选清单 · 只保存引用，音乐原件保持原位");
         } else if (chosen == exclude) {
             confirmCatalogRemoval(RemovalKind::Track, track.libraryId, track.relativePath);
         } else if (chosen == trash) {
@@ -463,6 +463,60 @@ void Window::activateWorkspaceTrack(const Track &snapshot) {
             return result;
         result.track = db.trackByIdentity(snapshot.libraryId, snapshot.relativePath);
         result.error = db.lastError();
+        return result;
+    }));
+}
+
+void Window::revealOriginalFile(const Track &snapshot) {
+    // Resolve current catalog identity, never a waveform/local compatibility cache.
+    // File-system checks stay off the GUI thread for disconnected network volumes.
+    struct Location { QString path, error; };
+    auto *watcher = new QFutureWatcher<Location>(this);
+    connect(watcher, &QFutureWatcher<Location>::finished, this, [this, watcher] {
+        const auto result = watcher->result();
+        watcher->deleteLater();
+        if (!result.error.isEmpty()) {
+            setStatus(result.error);
+            return;
+        }
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+        auto *process = new QProcess(this);
+        connect(process, &QProcess::errorOccurred, this, [this, process] {
+            setStatus("无法打开文件管理器：" + process->errorString());
+            process->deleteLater();
+        });
+        connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+                [this, process](int code, QProcess::ExitStatus exit) {
+            setStatus(code == 0 && exit == QProcess::NormalExit
+                          ? "已请求文件管理器定位原文件"
+                          : "无法定位原文件，请检查文件是否存在以及目录访问权限。");
+            process->deleteLater();
+        });
+        QTimer::singleShot(15000, process, [process] {
+            if (process->state() != QProcess::NotRunning) process->kill();
+        });
+#ifdef Q_OS_MACOS
+        process->start("/usr/bin/open", {"-R", result.path});
+#else
+        process->start("explorer.exe", {"/select,", QDir::toNativeSeparators(result.path)});
+#endif
+#else
+        if (!QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(result.path).absolutePath())))
+            setStatus("无法打开原文件所在目录。");
+#endif
+    });
+    watcher->setFuture(QtConcurrent::run(&searchPool_, [database = databasePath_, snapshot] {
+        Location result;
+        Index db(database);
+        if (!db.open(&result.error)) return result;
+        const auto track = db.trackByIdentity(snapshot.libraryId, snapshot.relativePath);
+        if (!track) {
+            result.error = "这首音乐已不在当前索引中，无法定位原文件。";
+            return result;
+        }
+        result.path = track->absolutePath();
+        if (!QDir::isAbsolutePath(result.path) || !QFileInfo(result.path).isFile())
+            result.error = "原文件不存在或暂时不可访问，请检查文件位置或网络挂载：" + result.path;
         return result;
     }));
 }

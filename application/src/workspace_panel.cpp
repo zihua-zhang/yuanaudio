@@ -83,27 +83,10 @@ WorkspacePanel::WorkspacePanel(const QString &databasePath, QWidget *parent)
     layout->setSpacing(6);
     mode_ = new QComboBox;
     mode_->setObjectName("workspaceMode");
-    mode_->addItems({"候选清单", "最近试听", "常用目录"});
+    mode_->addItem("最近试听", Recent);
+    mode_->addItem("常用目录", Folders);
     mode_->setAccessibleName("个人工作区视图");
     layout->addWidget(mode_);
-    listTools_ = new QWidget;
-    auto *tools = new QHBoxLayout(listTools_);
-    tools->setContentsMargins(0, 0, 0, 0);
-    tools->setSpacing(4);
-    lists_ = new QComboBox;
-    lists_->setObjectName("candidateLists");
-    lists_->setMinimumWidth(0);
-    lists_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-    lists_->setMinimumContentsLength(4);
-    lists_->setAccessibleName("当前候选清单");
-    tools->addWidget(lists_, 1);
-    auto *manage = new QPushButton("⋯");
-    manage->setObjectName("manageCandidateLists");
-    manage->setFixedWidth(32);
-    manage->setToolTip("新建、重命名或移除候选清单；不操作音乐原文件");
-    manage->setAccessibleName("管理候选清单");
-    tools->addWidget(manage);
-    layout->addWidget(listTools_);
     rows_ = new WorkspaceTrackList;
     rows_->setObjectName("workspaceRows");
     rows_->setMinimumWidth(0);
@@ -121,8 +104,6 @@ WorkspacePanel::WorkspacePanel(const QString &databasePath, QWidget *parent)
     notice_->setWordWrap(false);
     layout->addWidget(notice_);
     connect(mode_, &QComboBox::currentIndexChanged, this, &WorkspacePanel::refresh);
-    connect(lists_, &QComboBox::currentIndexChanged, this, &WorkspacePanel::refresh);
-    connect(manage, &QPushButton::clicked, this, &WorkspacePanel::editLists);
     connect(rows_, &QListWidget::itemActivated, this,
             [this](QListWidgetItem *item) { activateRow(rows_->row(item)); });
     connect(rows_, &QWidget::customContextMenuRequested, this, &WorkspacePanel::contextMenu);
@@ -130,7 +111,6 @@ WorkspacePanel::WorkspacePanel(const QString &databasePath, QWidget *parent)
         notice_->setWordWrap(true);
         notice_->setText("个人工作区暂不可用");
         notice_->setToolTip(store_.lastError());
-        listTools_->setEnabled(false);
         mode_->setEnabled(false);
     } else {
         refresh();
@@ -148,27 +128,14 @@ bool WorkspacePanel::report(bool success) {
     emit warning(store_.lastError());
     return false;
 }
-qint64 WorkspacePanel::currentCandidateList() const {
-    return lists_->currentData().toLongLong();
-}
-void WorkspacePanel::setCurrentCandidateList(qint64 listId) {
-    const int at = lists_->findData(listId);
-    if (at >= 0)
-        lists_->setCurrentIndex(at);
-}
 void WorkspacePanel::setMode(Mode mode) {
-    mode_->setCurrentIndex(mode);
-}
-bool WorkspacePanel::addCandidate(const Track &track) {
-    if (!report(store_.addCandidate(currentCandidateList(), track)))
-        return false;
-    refresh();
-    return true;
+    const auto at = mode_->findData(mode);
+    mode_->setCurrentIndex(at >= 0 ? at : 0);
 }
 bool WorkspacePanel::recordAudition(const Track &track) {
     if (!report(store_.recordAudition(track)))
         return false;
-    if (mode_->currentIndex() == Recent)
+    if (mode_->currentData().toInt() == Recent)
         refresh();
     return true;
 }
@@ -176,40 +143,23 @@ bool WorkspacePanel::pinFolder(const QString &libraryId, const QString &path, co
                                const QString &root) {
     if (!report(store_.pinFolder({libraryId, path, name, root})))
         return false;
-    if (mode_->currentIndex() == Folders)
+    if (mode_->currentData().toInt() == Folders)
         refresh();
     return true;
 }
 void WorkspacePanel::refresh() {
-    const auto listId = currentCandidateList();
     const int scroll = rows_->verticalScrollBar()->value();
     const auto previous = rows_->currentRow();
     const auto previousTrack = previous >= 0 && previous < tracks_.size() ? tracks_[previous] : Track{};
     const auto previousFolder =
         previous >= 0 && previous < folders_.size() ? folders_[previous] : PinnedFolder{};
-    const auto lists = store_.candidateLists();
-    if (!store_.lastError().isEmpty()) {
-        report(false);
-        return;
-    }
-    {
-        QSignalBlocker block(lists_);
-        lists_->clear();
-        for (const auto &list : lists)
-            lists_->addItem(list.name, list.id);
-        const int prior = lists_->findData(listId);
-        if (prior >= 0)
-            lists_->setCurrentIndex(prior);
-    }
-    lists_->setToolTip(lists_->currentText());
-    const int mode = mode_->currentIndex();
-    listTools_->setVisible(mode == Candidates);
+    const int mode = mode_->currentData().toInt();
     QList<Track> tracks;
     QList<PinnedFolder> folders;
     if (mode == Folders)
         folders = store_.pinnedFolders();
     else
-        tracks = mode == Recent ? store_.recents() : store_.candidates(currentCandidateList());
+        tracks = store_.recents();
     if (!store_.lastError().isEmpty()) {
         report(false);
         return;
@@ -237,16 +187,13 @@ void WorkspacePanel::refresh() {
         notice_->setToolTip(mode == Folders ? "双击定位左侧文件夹；移除只影响常用目录记录。"
                                             : "双击试听；拖动整首音频到剪辑软件，音乐原件保持原位。");
     } else {
-        notice_->setText(mode == Folders  ? "右键文件夹加入常用目录"
-                         : mode == Recent ? "最近试听 · 最多 100 首"
-                                          : "右键加入候选 · 原件保持原位");
-        notice_->setToolTip(mode == Folders  ? "在左侧目录上右键，加入常用目录。"
-                            : mode == Recent ? "试听过的音乐会出现在这里，最多 100 首。"
-                                             : "在音乐上右键，加入当前候选清单。只保存引用，不复制音乐。");
+        notice_->setText(mode == Folders ? "右键文件夹加入常用目录" : "最近试听 · 最多 100 首");
+        notice_->setToolTip(mode == Folders ? "在左侧目录上右键，加入常用目录。"
+                                           : "试听过的音乐会出现在这里，最多 100 首。");
     }
 }
 void WorkspacePanel::activateRow(int row) {
-    if (mode_->currentIndex() == Folders) {
+    if (mode_->currentData().toInt() == Folders) {
         if (row >= 0 && row < folders_.size()) {
             const auto folder = folders_[row];
             emit folderActivated(folder.libraryId, folder.path);
@@ -256,64 +203,36 @@ void WorkspacePanel::activateRow(int row) {
         emit trackActivated(track);
     }
 }
-void WorkspacePanel::editLists() {
-    QMenu menu(this);
-    auto *create = menu.addAction("新建候选清单…");
-    auto *rename = menu.addAction("重命名当前清单…");
-    auto *remove = menu.addAction("移除当前清单（保留音乐原件）");
-    const auto chosen = menu.exec(QCursor::pos());
-    if (!chosen)
-        return;
-    if (chosen == remove) {
-        if (report(store_.removeList(currentCandidateList())))
-            refresh();
-        return;
-    }
-    if (chosen != create && chosen != rename)
-        return;
-    bool ok = false;
-    const auto name =
-        QInputDialog::getText(this, chosen == create ? "新建候选清单" : "重命名候选清单", "清单名称",
-                              QLineEdit::Normal, chosen == create ? QString() : lists_->currentText(), &ok);
-    if (!ok)
-        return;
-    if (chosen == create) {
-        const auto id = store_.createList(name);
-        if (report(id != 0)) {
-            refresh();
-            setCurrentCandidateList(id);
-        }
-    } else if (report(store_.renameList(currentCandidateList(), name))) {
-        refresh();
-    }
-}
 void WorkspacePanel::contextMenu(const QPoint &point) {
     const auto *item = rows_->itemAt(point);
     if (!item)
         return;
     const int row = rows_->row(item);
-    const int mode = mode_->currentIndex();
-    const auto listId = currentCandidateList();
+    const int mode = mode_->currentData().toInt();
     const auto track = row < tracks_.size() ? tracks_[row] : Track{};
     const auto folder = row < folders_.size() ? folders_[row] : PinnedFolder{};
     QMenu menu(this);
     auto *activate = menu.addAction(mode == Folders ? "定位文件夹" : "试听");
-    auto *remove = menu.addAction(mode == Folders  ? "从常用目录移除"
-                                  : mode == Recent ? "移除这条试听记录"
-                                                   : "从当前候选清单移除");
+#ifdef Q_OS_MACOS
+    auto *reveal = mode == Recent ? menu.addAction("在 Finder 中显示") : nullptr;
+#else
+    auto *reveal = mode == Recent ? menu.addAction("在文件管理器中显示") : nullptr;
+#endif
+    auto *remove = menu.addAction(mode == Folders ? "从常用目录移除" : "移除这条试听记录");
     const auto chosen = menu.exec(rows_->viewport()->mapToGlobal(point));
     if (chosen == activate) {
         if (mode == Folders)
             emit folderActivated(folder.libraryId, folder.path);
         else
             emit trackActivated(track);
+    } else if (reveal && chosen == reveal) {
+        emit revealTrackRequested(track);
     } else if (chosen == remove) {
         bool success = false;
         if (mode == Folders) {
             success = store_.unpinFolder(folder.libraryId, folder.path);
         } else {
-            success = mode == Recent ? store_.removeRecent(track.libraryId, track.relativePath)
-                                     : store_.removeCandidate(listId, track.libraryId, track.relativePath);
+            success = store_.removeRecent(track.libraryId, track.relativePath);
         }
         if (report(success))
             refresh();

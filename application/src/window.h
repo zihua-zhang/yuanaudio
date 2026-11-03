@@ -254,6 +254,7 @@ class Window : public QMainWindow {
     void setupWorkspace(QVBoxLayout *left);
     void connectWorkspace();
     void activateWorkspaceTrack(const Track &track);
+    void revealOriginalFile(const Track &track);
     void selectTrackValue(const Track &track, std::optional<double> ratio = std::nullopt);
     void configureSharedCache(const QString &libraryId = {});
     void showWaveFailures();
